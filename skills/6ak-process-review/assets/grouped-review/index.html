@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>流程审阅</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/review.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到审阅稿</a>
+  <header class="topbar">
+    <div class="frame topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3.5 5.5h5.4c1.3 0 2.4.5 3.1 1.4.7-.9 1.8-1.4 3.1-1.4h5.4v12.1h-5.4c-1.3 0-2.4.5-3.1 1.4-.7-.9-1.8-1.4-3.1-1.4H3.5zM12 7v11.7M6.5 9.5h2.7m-2.7 3h2.7m5.6-3h2.7m-2.7 3h2.7"/>
+          </svg>
+        </span>
+        <span>流程审阅</span>
+      </div>
+      <div class="top-actions">
+        <button class="button quiet" type="button" id="open-step-search" hidden>查找步骤</button>
+        <div class="header-exports" id="header-exports" role="group" aria-label="导出" hidden>
+          <a class="button quiet" href="/download/flow.md" download="flow.md" id="download-flow" aria-label="导出流程文档 Markdown" title="导出流程文档 Markdown"><span><span class="export-verb">导出</span><span id="flow-output-label">流程文档</span></span><span aria-hidden="true">↓</span></a>
+          <a class="button quiet" href="/download/model.json" download="model.json" id="download-model" aria-label="导出业务模型 JSON" title="导出业务模型 JSON"><span>业务模型</span><span aria-hidden="true">↓</span></a>
+        </div>
+        <button class="button quiet" type="button" id="refresh-review" title="读取最新审阅稿">
+          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16.2 9a6.3 6.3 0 1 0-.8 4.3M16.4 4.6v4.7h-4.6"/></svg>
+          <span>读取新版</span>
+        </button>
+        <button class="button quiet" type="button" id="open-feedback">
+          <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 3.7h12v9.7h-5.8l-4.4 3.2v-3.2H4zM7 7.2h6M7 9.9h3.8"/></svg>
+          批注 <span id="feedback-count" class="badge" hidden></span>
+        </button>
+      </div>
+    </div>
+  </header>
+  <main id="main" class="frame" tabindex="-1">
+    <div id="page-alert" class="notice" role="alert" hidden></div>
+    <div id="version-notice" class="notice" role="status" hidden><span id="version-message"></span> <button id="read-available-version" class="text-button" type="button">读取新版</button></div>
+    <section class="intro" aria-labelledby="project-title">
+      <div class="intro-meta"><span class="eyebrow" id="review-kind">流程草稿</span><span id="revision-label" class="label"></span></div>
+      <h1 id="project-title">正在读取审阅稿</h1>
+      <div class="intro-stats" id="intro-stats" hidden>
+        <span id="group-count"></span>
+        <details class="scope-disclosure">
+          <summary>资料范围</summary>
+          <p id="project-scope" class="scope"></p>
+        </details>
+        <button id="issue-count" class="text-button" type="button"></button>
+        <button id="show-pending" class="text-button" type="button" hidden></button>
+        <button id="show-current-results" class="text-button" type="button" hidden></button>
+      </div>
+    </section>
+    <div class="work-area" id="work-area" hidden>
+      <aside class="rail" aria-label="审阅目录">
+        <div class="rail-inner">
+          <h2 id="stage-index-title">阶段目录</h2>
+          <nav id="group-nav" aria-labelledby="stage-index-title"></nav>
+        </div>
+      </aside>
+      <div class="review-column">
+        <section class="review-bar" aria-label="筛选内容">
+          <div class="filters" id="review-filters">
+            <button type="button" class="filter" id="filter-all" data-filter="all" aria-pressed="true">正文</button>
+            <button type="button" class="filter" id="filter-open" data-filter="open" aria-pressed="false">存在疑点</button>
+            <button type="button" class="filter" id="filter-noted" data-filter="noted" aria-pressed="false">待处理批注</button>
+            <button type="button" class="filter" id="filter-changed" data-filter="changed" aria-pressed="false">本轮修改核对</button>
+          </div>
+          <p class="margin-heading" id="margin-heading" hidden>疑点、依据与批注</p>
+        </section>
+        <nav id="issue-nav" aria-label="疑点索引" hidden></nav>
+        <div id="review-groups"></div>
+        <div id="review-empty" class="empty" hidden>这个筛选下暂无内容。</div>
+      </div>
+    </div>
+  </main>
+  <aside id="reading-return" class="reading-return" aria-label="流程跳转" hidden>
+    <button id="return-to-reading" type="button" class="button secondary">← 返回原处</button>
+    <span id="reading-origin"></span>
+    <button id="dismiss-reading-return" type="button" class="icon-button" aria-label="关闭返回提示">×</button>
+  </aside>
+  <button type="button" id="comment-selection" class="button primary selection-button" hidden>批注所选文字</button>
+  <dialog id="drawer" aria-labelledby="drawer-title">
+    <nav id="linked-step-navigation" class="linked-step-navigation" aria-labelledby="linked-step-path-title" hidden>
+      <p id="linked-step-path-title" class="linked-step-path-title">浏览路径</p>
+      <button id="linked-step-origin" type="button" class="linked-step-origin">
+        <span>← 正文起点</span><strong id="linked-step-source"></strong>
+      </button>
+      <ol id="linked-step-path" class="linked-step-path" role="list"></ol>
+    </nav>
+    <div class="drawer-panel">
+      <div class="drawer-header">
+        <div>
+          <button id="drawer-back" type="button" class="text-button drawer-back" hidden></button>
+          <p id="drawer-kicker" class="eyebrow">业务说明</p>
+          <h2 id="drawer-title" tabindex="-1"></h2>
+        </div>
+        <button id="close-drawer" type="button" class="icon-button" aria-label="关闭">
+          <svg viewBox="0 0 20 20" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m5.5 5.5 9 9m0-9-9 9"/></svg>
+        </button>
+      </div>
+      <div id="linked-step-actions" class="linked-step-actions" hidden>
+        <button id="linked-step-back" type="button" class="text-button" hidden>← 上一层</button>
+        <div class="linked-step-tools">
+          <button id="return-search-results" type="button" class="text-button" hidden>返回搜索结果</button>
+          <button id="linked-step-locate" type="button" class="text-button">在正文定位</button>
+          <button id="linked-step-choose" type="button" class="text-button">查找步骤</button>
+          <button id="linked-step-annotate" type="button" class="button primary">批注此步</button>
+        </div>
+      </div>
+      <div id="linked-feedback-bar" class="linked-feedback-bar" hidden>
+        <span id="linked-draft-status" role="status"></span>
+        <button id="linked-step-feedback" type="button" class="text-button">本批批注 0</button>
+      </div>
+      <div id="drawer-body" class="drawer-body"></div>
+    </div>
+  </dialog>
+  <div id="announcement" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

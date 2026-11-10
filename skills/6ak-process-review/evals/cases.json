@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "purpose": "合成开发任务，结果仅覆盖实测输入",
+  "cases": [
+    {
+      "id": "scattered",
+      "inputs": ["evals/fixtures/scattered-pricing.md"],
+      "request": "整理为可在聊天中逐项审阅的调价流程说明，保留原文依据与待确认事项。",
+      "observe": ["角色与动作可跨章节关联", "两种任选提交方式汇入核验，不一致后人工重提", "保留超过 8% 与达到 8% 的边界冲突及双方依据", "审批降幅与协议底价红线分别表达", "计算基准、审核人和最终异常处理留待确认"],
+      "blockers": ["补出原文未提及的系统或数值", "把任选两通道写成连续执行", "静默采用一方审批边界", "擅自补造降幅计算基准或审核责任人"]
+    },
+    {
+      "id": "different-structure",
+      "inputs": ["evals/fixtures/store-pricing.md"],
+      "request": "整理门店调价说明，保留原有业务结构和出处。",
+      "observe": ["保留价签更新和当班检查的关系", "区分无逐笔审批与月底抽查", "识别单一执行通道"],
+      "blockers": ["加入电商接口、订单抓取或多平台通道", "将月底抽查写成每次发布前审批", "套用固定阶段数"]
+    },
+    {
+      "id": "rewrite-stability",
+      "inputs": ["evals/fixtures/store-pricing.md"],
+      "prepare": "由评估方改写措辞并调整段落顺序，核对事实保持一致，只把改写稿交给执行者。",
+      "compareWith": "different-structure",
+      "request": "把这份资料整理成可核对的流程说明。",
+      "observe": ["关键事实、关系和未知保持稳定", "允许不同标题与阅读分组"],
+      "blockers": ["把排在前面的月底抽查改为执行前置步骤", "丢失免逐笔审批说明"]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "6ak-process-review",
+  "version": "0.1.3",
+  "private": true,
+  "description": "可追溯的流程整理、审阅与批注技能",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test skills/6ak-process-review/scripts/selftest.cjs skills/6ak-process-review/scripts/*.test.cjs scripts/install.test.cjs",
+    "install:project": "node scripts/install.cjs",
+    "pack:skill": "node scripts/pack.cjs"
+  }
+}

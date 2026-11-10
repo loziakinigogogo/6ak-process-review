@@ -1,0 +1,387 @@
+{
+  "schemaVersion": 1,
+  "report": {
+    "id": "channel-x-pricing-example",
+    "title": "渠道 X 调价流程 · 开发示例",
+    "version": "1",
+    "scope": "仅整理本示例中的核算、提交、核验及审批疑点。",
+    "limitations": [
+      "开发示例用于说明接口，不是当前组织的业务规则或泛化证明。",
+      "审批阈值存在冲突；核验异常处置未说明。"
+    ]
+  },
+  "sources": [
+    {
+      "id": "source-1",
+      "name": "messy-pricing.md",
+      "sha256": "67cb2aab63adbd558a07ff58634fb92463189bb09c4509e27204e168270979f0",
+      "text": "# 渠道 X 调价零散记录\n\n客服补充：改价前由运营核算目标价。\n运营备注：把目标价录入渠道后台；提交后检查前台展示。\n旧草稿：降幅超过 15% 需主管审批。\n群内补充：降幅超过 20% 需主管审批，未说明是否替代旧草稿。\n备注：展示价不一致时如何处理，资料未说明。\n"
+    }
+  ],
+  "claims": [
+    {
+      "id": "calculate",
+      "text": "改价前由运营核算目标价。",
+      "origin": "explicit",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 3,
+          "endLine": 3,
+          "quote": "客服补充：改价前由运营核算目标价。"
+        }
+      ],
+      "issueIds": []
+    },
+    {
+      "id": "operator",
+      "text": "运营负责核算目标价。",
+      "origin": "explicit",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 3,
+          "endLine": 3,
+          "quote": "客服补充：改价前由运营核算目标价。"
+        }
+      ],
+      "issueIds": []
+    },
+    {
+      "id": "submit",
+      "text": "把目标价录入渠道后台。",
+      "origin": "explicit",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 4,
+          "endLine": 4,
+          "quote": "运营备注：把目标价录入渠道后台；提交后检查前台展示。"
+        }
+      ],
+      "issueIds": []
+    },
+    {
+      "id": "system",
+      "text": "录入使用渠道后台。",
+      "origin": "explicit",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 4,
+          "endLine": 4,
+          "quote": "运营备注：把目标价录入渠道后台；提交后检查前台展示。"
+        }
+      ],
+      "issueIds": []
+    },
+    {
+      "id": "check",
+      "text": "提交后检查前台展示。",
+      "origin": "explicit",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 4,
+          "endLine": 4,
+          "quote": "运营备注：把目标价录入渠道后台；提交后检查前台展示。"
+        }
+      ],
+      "issueIds": []
+    },
+    {
+      "id": "submission-before-check",
+      "text": "提交完成后检查前台展示。",
+      "origin": "explicit",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 4,
+          "endLine": 4,
+          "quote": "运营备注：把目标价录入渠道后台；提交后检查前台展示。"
+        }
+      ],
+      "issueIds": []
+    },
+    {
+      "id": "calculation-before-submission",
+      "text": "核算目标价后再录入该目标价。",
+      "origin": "inferred",
+      "evidence": [],
+      "premiseIds": [
+        "calculate",
+        "submit"
+      ],
+      "rationale": "录入对象是需要先核算的目标价；原文没有独立给出两步之间的流转说明。",
+      "issueIds": []
+    },
+    {
+      "id": "approval-15",
+      "text": "旧草稿写降幅超过 15% 需主管审批。",
+      "origin": "explicit",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 5,
+          "endLine": 5,
+          "quote": "旧草稿：降幅超过 15% 需主管审批。"
+        }
+      ],
+      "issueIds": [
+        "threshold-conflict"
+      ]
+    },
+    {
+      "id": "approval-20",
+      "text": "群内补充写降幅超过 20% 需主管审批，未说明是否替代旧草稿。",
+      "origin": "explicit",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 6,
+          "endLine": 6,
+          "quote": "群内补充：降幅超过 20% 需主管审批，未说明是否替代旧草稿。"
+        }
+      ],
+      "issueIds": [
+        "threshold-conflict"
+      ]
+    },
+    {
+      "id": "unknown-mismatch",
+      "text": "展示价不一致时的处理方式未说明。",
+      "origin": "unknown",
+      "evidence": [
+        {
+          "sourceId": "source-1",
+          "startLine": 7,
+          "endLine": 7,
+          "quote": "备注：展示价不一致时如何处理，资料未说明。"
+        }
+      ],
+      "issueIds": [
+        "mismatch-missing"
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "id": "price-change",
+      "title": "核算、提交与核验",
+      "kind": "editorial",
+      "claimIds": []
+    }
+  ],
+  "nodes": [
+    {
+      "id": "calculate",
+      "groupId": "price-change",
+      "title": "核算目标价",
+      "claimIds": [
+        "calculate",
+        "operator"
+      ],
+      "fields": {
+        "role": [
+          "operator"
+        ],
+        "system": [],
+        "trigger": [],
+        "input": [],
+        "actions": [
+          "calculate"
+        ],
+        "output": [],
+        "rules": []
+      }
+    },
+    {
+      "id": "submit",
+      "groupId": "price-change",
+      "title": "录入渠道后台",
+      "claimIds": [
+        "submit",
+        "system",
+        "approval-15",
+        "approval-20"
+      ],
+      "fields": {
+        "role": [],
+        "system": [
+          "system"
+        ],
+        "trigger": [],
+        "input": [],
+        "actions": [
+          "submit"
+        ],
+        "output": [],
+        "rules": [
+          "approval-15",
+          "approval-20"
+        ]
+      }
+    },
+    {
+      "id": "check",
+      "groupId": "price-change",
+      "title": "检查前台展示",
+      "claimIds": [
+        "check",
+        "unknown-mismatch"
+      ],
+      "fields": {
+        "role": [],
+        "system": [],
+        "trigger": [],
+        "input": [],
+        "actions": [
+          "check"
+        ],
+        "output": [
+          "unknown-mismatch"
+        ],
+        "rules": []
+      }
+    }
+  ],
+  "relations": [
+    {
+      "id": "calculate-submit",
+      "from": "calculate",
+      "to": "submit",
+      "type": "sequence",
+      "claimIds": [
+        "calculation-before-submission"
+      ],
+      "conditionClaimIds": []
+    },
+    {
+      "id": "submit-check",
+      "from": "submit",
+      "to": "check",
+      "type": "sequence",
+      "claimIds": [
+        "submission-before-check"
+      ],
+      "conditionClaimIds": []
+    }
+  ],
+  "rules": [
+    {
+      "id": "approval-threshold",
+      "title": "审批降幅口径冲突",
+      "claimIds": [
+        "approval-15",
+        "approval-20"
+      ],
+      "parameters": {
+        "operator": [
+          "approval-15",
+          "approval-20"
+        ],
+        "value": [
+          "approval-15",
+          "approval-20"
+        ],
+        "unit": [
+          "approval-15",
+          "approval-20"
+        ],
+        "basis": [],
+        "scope": [],
+        "exceptions": []
+      }
+    }
+  ],
+  "issues": [
+    {
+      "id": "threshold-conflict",
+      "type": "conflict",
+      "severity": "critical",
+      "status": "open",
+      "question": "审批阈值为超过 15% 还是超过 20%？两者是否适用不同范围？",
+      "impact": "无法确定哪些降价必须审批，未将任一口径画成确定分支。",
+      "claimIds": [
+        "approval-15",
+        "approval-20"
+      ],
+      "nodeIds": [
+        "submit"
+      ],
+      "relationIds": []
+    },
+    {
+      "id": "mismatch-missing",
+      "type": "missing",
+      "severity": "major",
+      "status": "open",
+      "question": "展示价不一致时由谁、如何处理？",
+      "impact": "不能确定核验异常的后续路径。",
+      "claimIds": [
+        "unknown-mismatch"
+      ],
+      "nodeIds": [
+        "check"
+      ],
+      "relationIds": []
+    }
+  ],
+  "coverage": [
+    {
+      "sourceId": "source-1",
+      "startLine": 1,
+      "endLine": 4,
+      "disposition": "represented",
+      "claimIds": [
+        "calculate",
+        "operator",
+        "submit",
+        "system",
+        "check",
+        "submission-before-check"
+      ],
+      "issueIds": [],
+      "reason": "标题与核算、提交、核验描述已纳入。"
+    },
+    {
+      "sourceId": "source-1",
+      "startLine": 5,
+      "endLine": 6,
+      "disposition": "issue",
+      "claimIds": [
+        "approval-15",
+        "approval-20"
+      ],
+      "issueIds": [
+        "threshold-conflict"
+      ],
+      "reason": "保留两处阈值，待确认适用规则。"
+    },
+    {
+      "sourceId": "source-1",
+      "startLine": 7,
+      "endLine": 7,
+      "disposition": "issue",
+      "claimIds": [
+        "unknown-mismatch"
+      ],
+      "issueIds": [
+        "mismatch-missing"
+      ],
+      "reason": "将缺失异常处理列为疑点。"
+    }
+  ],
+  "review": {
+    "semantic": {
+      "status": "not_run",
+      "reviewer": "",
+      "notes": []
+    },
+    "visual": {
+      "status": "not_run",
+      "reviewer": "",
+      "notes": []
+    }
+  }
+}
