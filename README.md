@@ -36,6 +36,23 @@ node scripts/install.cjs <业务项目根目录>
 
 ## 开发和验证
 
+### 0.1.4 工作台开发基线
+
+图形工作台在独立的 [`workbench/`](workbench/README.md) 中继续开发，当前为 `0.1.4-dev.0`。包含节点与分支直接编辑、本地保存、编辑稿恢复、实时更新、跨组上下文、自动避障和 ELK 分组布局。UI 仍在打磨，此目录尚未接入可安装 skill，也不随 skill 打包。
+
+在仓库根目录运行：
+
+```powershell
+npm ci
+npm run demo:dev
+```
+
+这会用合成资料启动隔离任务；服务地址由终端输出。已有任务使用 `npm run demo:dev -- --task "已有任务绝对路径"` 恢复。前端使用 Vite 热更新，保存仍通过本地服务。构建后试用可运行 `npm run demo:build` 和 `npm run demo`；验证命令及资料导入见[工作台说明](workbench/README.md)。
+
+正式 skill 继续保持 0.1.3：根 `package.json` 的版本用于现有安装与发布流程，不因工作台开发里程碑而提前递增。后续需要明确接入 skill 时，再统一处理版本、安装包和兼容验证。
+
+### Skill 验证
+
 ```powershell
 npm test
 ```

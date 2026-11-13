@@ -2,3 +2,5 @@ node_modules/
 .qa/
 dist/
 *.log
+
+workbench/frontend/build/
