@@ -3,10 +3,34 @@
   "version": "0.1.3",
   "private": true,
   "description": "可追溯的流程整理、审阅与批注技能",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "test": "node --test skills/6ak-process-review/scripts/selftest.cjs skills/6ak-process-review/scripts/*.test.cjs scripts/install.test.cjs",
+    "test": "node --test skills/6ak-process-review/scripts/selftest.cjs skills/6ak-process-review/scripts/*.test.cjs scripts/install.test.cjs workbench/scripts/*.test.cjs",
     "install:project": "node scripts/install.cjs",
-    "pack:skill": "node scripts/pack.cjs"
+    "pack:skill": "node scripts/pack.cjs",
+    "demo": "node workbench/scripts/workbench.cjs demo",
+    "demo:dev": "node workbench/scripts/workbench.cjs dev",
+    "demo:build": "vite build --config workbench/frontend/vite.config.mjs",
+    "demo:test": "node --test workbench/scripts/workbench*.test.cjs",
+    "demo:check": "tsc -p workbench/frontend/tsconfig.json",
+    "demo:test:browser": "node scripts/check-workbench-browser.cjs",
+    "demo:test:layout": "node scripts/check-workbench-layout-browser.cjs",
+    "demo:test:initial-layout": "node scripts/check-workbench-initial-layout-browser.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@tisoap/react-flow-smart-edge": "5.0.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "@xyflow/react": "12.12.1",
+    "elkjs": "0.12.1",
+    "lucide-react": "1.72.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
   }
 }
