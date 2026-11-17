@@ -11,6 +11,8 @@ pricing-ref:v1 {"reportId":"approval-review","modelSha256":"<完整摘要>","typ
 
 `type` 为 `node`、`relation`、`rule`、`issue` 或 `claim`。可读名称供人确认，定位依据为项目 ID、模型 SHA-256、对象类型和稳定 ID。摘要计算为 `SHA-256(JSON.stringify(model))`。读取范围只限用户此次要改的对象及受影响引用。
 
+`pricing-ref:v1` 保持兼容，用于核对模型对象，不决定任务的写入工具。先按[定位当前稿](current-draft.md)确认任务类型，工作台任务经候选核对采用，旧受管任务经原批次草稿流程处理。`process-review-workbench-ref:v1` 则使用[工作台引用入口](workbench.md#起草核对与采用候选)，不要交给只识别报告对象引用的工具。
+
 一条陈述可能出现在多个地方。`claim` 引用可带 `context` 对象，包含 `type`、`id` 及可选 `field`。通用陈述列表使用 `claimIds`，节点字段可用 `role`、`actions` 等裸键，规则参数可用 `value`、`basis` 等裸键，关系条件可用 `conditionClaimIds`，问题结论可用 `resolutionClaimIds`。核对反馈要更正共享事实，还是只调整此处的适用范围。局部变化可能要拆出新陈述并更新局部引用。
 
 把引用作为纯文本交给定位工具，输入文件可以含对象标题和用户消息。每次校验一条引用。

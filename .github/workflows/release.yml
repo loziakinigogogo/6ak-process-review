@@ -18,10 +18,17 @@ jobs:
         with:
           node-version: '22'
       - name: Verify release version
-        run: node -e 'if (process.env.GITHUB_REF_NAME !== "v" + require("./package.json").version) process.exit(1)'
+        run: node -e 'const v = require("./package.json").version; if (process.env.GITHUB_REF_NAME !== "v" + v || require("./package-lock.json").version !== v || require("./skills/6ak-process-review/workbench/package.json").version !== v) process.exit(1)'
+      - run: npm ci
+      - run: npm run demo:check
+      - run: npm run demo:build
       - run: npm test
       - run: npm run pack:skill -- dist
+      - name: Verify packaged workbench in a browser
+        run: |
+          npx playwright install --with-deps chromium
+          node scripts/check-installed-workbench-browser.cjs
       - name: Publish ZIP and standalone installer
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "dist/6ak-process-review-$GITHUB_REF_NAME.zip" scripts/install.cjs --verify-tag --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" "dist/6ak-process-review-$GITHUB_REF_NAME.zip" scripts/install.cjs --verify-tag --title "$GITHUB_REF_NAME" --notes-file "docs/releases/$GITHUB_REF_NAME.md"

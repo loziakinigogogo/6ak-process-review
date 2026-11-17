@@ -55,6 +55,12 @@ async function main() {
   const taskDirectory = path.join(directory, 'task');
   fs.mkdirSync(directory, { recursive: true });
   let app = await startServer({ taskDirectory, positions: obstructedPositions() });
+  // Preserve this suite's legacy vertical routing/drag/undo scenarios. Automatic
+  // and horizontal direction behavior has a separate integration browser suite.
+  const fixtureFile = path.join(taskDirectory, 'workbench', 'state.json');
+  const fixture = JSON.parse(fs.readFileSync(fixtureFile, 'utf8'));
+  fixture.view.defaultLayoutDirection = 'DOWN';
+  fs.writeFileSync(fixtureFile, JSON.stringify(fixture, null, 2));
   const { getGraphScope } = await import('../workbench/frontend/src/graph-scope.mjs');
   const seed = app.store.read();
   // Deliberately retain an existing obstructed layout to exercise Smart routing.
@@ -62,6 +68,11 @@ async function main() {
   const visible = getGraphScope(seed.model, 'execute').visibleIds;
   app.store.updateView({ layout: { scopeId: 'execute', action: 'initialize', baseRevision: 0, baseModelHash: seed.modelHash,
     positions: Object.fromEntries(Object.entries(seed.view.positions).filter(([id]) => visible.has(id))), routes: {} } });
+  // These deliberately obstructed coordinates are a manual routing fixture.
+  // Automatic content-layout migration must preserve them while we test the
+  // fallback obstacle router; the explicit Arrange below still releases them.
+  app.store.updateView({ layout: { scopeId: 'execute', action: 'move', baseRevision: 1,
+    positions: Object.fromEntries(Object.entries(seed.view.positions).filter(([id]) => visible.has(id))) } });
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : undefined);
   const browser = await chromium.launch({ executablePath, headless: true, args: ['--use-mock-keychain', '--password-store=basic'] });
   const checks = [], errors = [], routeSnapshots = [], layoutRequests = [];
@@ -88,20 +99,36 @@ async function main() {
     await expect(page.getByTestId('graph-canvas')).toHaveAttribute('aria-busy', 'false', { timeout: 30000 });
   };
   const fit = async () => {
+    if(!(await page.getByRole('button',{name:'适应当前图',exact:true}).isVisible()))await page.getByRole('button',{name:'图工具',exact:true}).click();
     await page.getByRole('button', { name: '适应当前图', exact: true }).click();
     await page.waitForTimeout(450); // The control animates its viewport for 300 ms.
   };
-  const arrange = async (scopeId = 'execute') => {
-    await expect(page.getByTestId('arrange-layout')).toBeEnabled({ timeout: 30000 });
+  const resumeMaterial = async () => {
+    await page.getByTestId('view-graph').click();
+    await page.getByTestId('organize-node').click();
+    await page.locator('[data-content-node-id="validate"]').getByTestId('add-content-note').click();
+    return page.getByLabel('补充原话',{exact:true});
+  };
+  const automaticLayout = async (control, scopeId = 'execute') => {
+    const button = page.getByTestId(control);
+    await expect(button).toBeEnabled({ timeout: 30000 });
     const before = scoped(await state(), scopeId)?.revision || 0;
-    await page.getByTestId('arrange-layout').click();
+    const requestCount = layoutRequests.length;
+    await button.click();
     await expect.poll(async () => scoped(await state(), scopeId)?.revision || 0, { timeout: 30000 }).toBeGreaterThan(before);
     await expect(page.getByTestId('arrange-layout')).toBeEnabled({ timeout: 30000 });
+    assert.ok(layoutRequests.slice(requestCount).some(layout => layout.action === 'reset' && layout.scopeId === scopeId));
     await fit();
     return state();
   };
-  const dragGesture = async (id, dx = 45, dy = 28) => {
-    await fit();
+  const arrange = scopeId => automaticLayout('arrange-layout', scopeId);
+  const undoLayout = async () => {
+    const before = scoped(await state()).revision;
+    await page.getByTestId('undo-layout').click();
+    await expect.poll(async () => scoped(await state()).revision).toBeGreaterThan(before);
+    return state();
+  };
+  const visibleNodePoint = async id => {
     const hit = await page.getByTestId('graph-node-' + id).evaluate(node => {
       const box = node.getBoundingClientRect();
       for (const xPart of [.5, .7, .3]) for (const yPart of [.3, .5, .7]) {
@@ -110,7 +137,12 @@ async function main() {
       }
       return null;
     });
-    assert.ok(hit, 'drag must hit the visible node rather than an overlay: ' + id);
+    assert.ok(hit, 'interaction must hit the visible node rather than an overlay: ' + id);
+    return hit;
+  };
+  const dragGesture = async (id, dx = 45, dy = 28) => {
+    await fit();
+    const hit = await visibleNodePoint(id);
     await page.mouse.move(hit.x, hit.y);
     await page.mouse.down();
     await page.mouse.move(hit.x + dx, hit.y + dy, { steps: 10 });
@@ -152,8 +184,9 @@ async function main() {
 
     await page.getByTestId('graph-node-validate').click();
     const draftTitle = '布局调整期间保留的未保存输入';
-    await page.getByTestId('node-title').fill(draftTitle);
-    await expect.poll(() => Object.values(app.store.buffers('local-reviewer')).some(buffer => buffer.draft.title === draftTitle)).toBe(true);
+    await (await resumeMaterial()).fill(draftTitle);
+    await expect.poll(() => Object.values(app.store.buffers('content-editor')).some(buffer => buffer.draft?.text === draftTitle)).toBe(true);
+    await page.getByTestId('view-graph').click();
     const beforeArrange = await state();
     const arranged = await arrange();
     assert.ok(Object.keys(scoped(arranged).positions).length > 0);
@@ -162,39 +195,40 @@ async function main() {
     assert.deepEqual(arranged.view.positions, baseline, 'legacy baseline remains unchanged');
     const arrangedRoutes = await routesClear('after ELK arrangement');
     assert.ok(arrangedRoutes.routes.some(route => route.strategy === 'elk'), 'at least one saved ELK route must actually render');
-    await expect(page.getByTestId('node-title')).toHaveValue(draftTitle);
-    await expect(page.getByTestId('save-node')).toBeEnabled();
+    await expect(await resumeMaterial()).toHaveValue(draftTitle);
+    await expect(page.getByTestId('save-content')).toBeEnabled();
+    await page.getByTestId('view-graph').click();
     check('ELK arrangement saves scoped positions and routes while preserving unsaved content');
 
     const manualPosition = await drag('manual');
     const beforePinnedArrange = await state();
     const arrangedWithManual = await arrange();
-    assert.deepEqual(scoped(arrangedWithManual).positions.manual, manualPosition, 'arrange must keep the exact user position');
-    assert.ok(scoped(arrangedWithManual).manualNodeIds.includes('manual'));
-    await routesClear('after rearranging with a manually fixed node');
-    check('dragging fixes a node, and arranging again keeps its exact coordinates');
+    assert.notDeepEqual(scoped(arrangedWithManual).positions.manual, manualPosition, 'arrange must recompute the user position');
+    assert.deepEqual(scoped(arrangedWithManual).manualNodeIds, []);
+    await expect(page.getByTestId('graph-node-manual')).toHaveAttribute('data-manual', 'false');
+    await routesClear('after rearranging a manually placed node');
+    check('manually placing a node saves its position and arranging again resets it');
 
     const laterMove = await drag('import', 'execute', -35, 38);
-    const revisionBeforeUndo = scoped(await state()).revision;
-    await page.getByTestId('undo-layout').click();
-    await expect.poll(async () => scoped(await state()).revision).toBeGreaterThan(revisionBeforeUndo);
-    const undone = await state();
+    const undone = await undoLayout();
     assert.deepEqual(scoped(undone).positions.import, laterMove, 'undo must preserve a manual move performed after the arrangement');
     assert.deepEqual(scoped(undone).positions.manual, manualPosition);
-    assert.ok(scoped(undone).manualNodeIds.includes('import'));
+    assert.deepEqual(new Set(scoped(undone).manualNodeIds), new Set(['import', 'manual']));
     for (const id of Object.keys(scoped(beforePinnedArrange).positions)) if (id !== 'import') {
       assert.deepEqual(position(undone, id), position(beforePinnedArrange, id), 'undo must restore the previous position of ' + id);
     }
     check('undoing an arrangement preserves subsequent manual moves');
 
-    await page.getByTestId('graph-node-manual').click();
+    const manualHit = await visibleNodePoint('manual');
+    await page.mouse.click(manualHit.x, manualHit.y);
     await page.getByTestId('release-node-position').click();
     await expect.poll(async () => scoped(await state()).manualNodeIds.includes('manual')).toBe(false);
-    await expect(page.getByTestId('graph-node-manual')).not.toHaveAttribute('data-manual', 'true');
-    const released = await arrange();
-    assert.notDeepEqual(scoped(released).positions.manual, manualPosition, 'released node can be placed by the layout engine again');
-    assert.deepEqual(scoped(released).positions.import, laterMove, 'releasing one node leaves the other fixed');
-    check('releasing a fixed node allows it to participate in arrangement again');
+    await expect(page.getByTestId('graph-node-manual')).toHaveAttribute('data-manual', 'false');
+    const released = await state();
+    assert.deepEqual(scoped(released).positions.manual, manualPosition);
+    assert.deepEqual(scoped(released).positions.import, laterMove);
+    assert.deepEqual(scoped(released).manualNodeIds, ['import']);
+    check('releasing one manual marker keeps both positions and the other mark');
 
     const executeLayout = structuredClone(scoped(await state()));
     const executeShared = position(await state(), 'calculate');
@@ -216,7 +250,7 @@ async function main() {
     let heldLayout;
     await page.route('**/api/workbench/view', async route => {
       const body = route.request().postDataJSON();
-      if (body?.layout?.action === 'arrange') { heldLayout = body.layout; markArrived(); await held; }
+      if (body?.layout?.action === 'reset') { heldLayout = body.layout; markArrived(); await held; }
       await route.continue();
     });
     try {
@@ -231,14 +265,20 @@ async function main() {
       await expect(page.getByTestId('group-prepare')).toHaveAttribute('aria-current', 'page');
       assert.deepEqual(scoped(await state(), 'prepare'), prepareLayout);
     } finally { releaseRequest(); await page.unroute('**/api/workbench/view'); }
-    check('an in-flight arrange cannot write positions into the group opened afterward');
+    check('an in-flight arrangement cannot write positions into the group opened afterward');
 
     await switchGroup('execute');
+    await expect(page.getByTestId('graph-node-import')).toHaveAttribute('data-manual', 'false');
+    // Keep the endpoint of manual -> validate exposed: dragging import down
+    // and left would physically cover that handle, making a clear route impossible.
+    await drag('import', 'execute', 35, 0);
     await page.getByTestId('graph-node-validate').click();
-    await expect(page.getByTestId('node-title')).toHaveValue(draftTitle);
+    await expect(await resumeMaterial()).toHaveValue(draftTitle);
+    await page.getByTestId('view-graph').click();
     const beforeReload = await state();
     await page.reload();
-    await expect(page.getByTestId('node-title')).toHaveValue(draftTitle);
+    await expect(await resumeMaterial()).toHaveValue(draftTitle);
+    await page.getByTestId('view-graph').click();
     await expect(page.getByTestId('graph-node-import')).toHaveAttribute('data-manual', 'true');
     assert.deepEqual((await state()).view.layouts, beforeReload.view.layouts);
     assert.deepEqual((await state()).view.positions, baseline);
@@ -260,7 +300,8 @@ async function main() {
     context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     watchPage(await context.newPage());
     await page.goto(app.url);
-    await expect(page.getByTestId('node-title')).toHaveValue(draftTitle);
+    await expect(await resumeMaterial()).toHaveValue(draftTitle);
+    await page.getByTestId('view-graph').click();
     await expect(page.getByTestId('graph-node-import')).toHaveAttribute('data-manual', 'true');
     const restarted = await state();
     assert.notEqual(app.url, oldURL);
@@ -300,6 +341,7 @@ async function main() {
     assert.notDeepEqual(failedMove.positions[failedNodeId], position(beforeFailedMove, failedNodeId));
     await assertPendingPosition();
     await expect(page.getByTestId('arrange-layout')).toBeDisabled();
+    await expect(page.getByTestId('reset-layout')).toBeDisabled();
     await switchGroup('prepare');
     await expect(retryPosition()).toHaveCount(0);
     assert.deepEqual(scoped(await state(), 'prepare'), scoped(beforeFailedMove, 'prepare'));
@@ -337,13 +379,22 @@ async function main() {
     const keyboardPosition = { x: position(beforeKeyboard, 'manual').x + 5, y: position(beforeKeyboard, 'manual').y };
     await expect.poll(async () => position(await state(), 'manual')).toEqual(keyboardPosition);
     await expect(page.getByTestId('graph-node-manual')).toHaveAttribute('data-manual', 'true');
-    const afterKeyboardArrange = await arrange();
-    assert.deepEqual(position(afterKeyboardArrange, 'manual'), keyboardPosition);
-    assert.ok(scoped(afterKeyboardArrange).manualNodeIds.includes('manual'));
-    assert.deepEqual(scoped(afterKeyboardArrange, 'prepare'), scoped(beforeKeyboard, 'prepare'));
-    assert.equal(afterKeyboardArrange.modelHash, initial.modelHash);
+    check('keyboard movement saves a five-pixel step');
+
+    const beforeReset = await state();
+    const reset = await automaticLayout('reset-layout');
+    assert.notDeepEqual(position(reset, 'manual'), keyboardPosition);
+    assert.deepEqual(scoped(reset).manualNodeIds, []);
+    assert.deepEqual(scoped(reset, 'prepare'), scoped(beforeReset, 'prepare'));
+    assert.equal(reset.modelHash, initial.modelHash);
+    assert.equal(reset.workRevision, initial.workRevision);
+    await expect(page.getByTestId('reset-layout')).toBeDisabled();
+    const recovered = await undoLayout();
+    assert.deepEqual(scoped(recovered).positions, scoped(beforeReset).positions);
+    assert.deepEqual(scoped(recovered).manualNodeIds, scoped(beforeReset).manualNodeIds);
+    assert.deepEqual(scoped(recovered, 'prepare'), scoped(beforeReset, 'prepare'));
     assert.deepEqual(errors, []);
-    check('keyboard movement saves a five-pixel step and remains fixed through arrangement');
+    check('the reset button clears only current graph positions and undo restores manual positions and their markers');
     fs.writeFileSync(path.join(directory, 'summary.json'), JSON.stringify({ passed: true, checks, errors, taskDirectory, layoutRequests }, null, 2));
     console.log('LAYOUT_BROWSER_QA=' + directory);
   } catch (error) {

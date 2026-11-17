@@ -4,18 +4,21 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { inventory, readRelease, skillName, bundleName, versionPattern } = require('./install.cjs');
+const { sourceFiles, readRelease, skillName, bundleName, versionPattern } = require('./install.cjs');
 
 function pack(outputDirectory) {
   const { version } = require('../package.json');
   if (!versionPattern.test(version)) throw new Error('package.json 必须指定正式发布版本。');
   const root = path.join(__dirname, '..', 'skills', skillName);
+  if (JSON.parse(fs.readFileSync(path.join(root, 'workbench', 'package.json'), 'utf8')).version !== version) {
+    throw new Error('工作台运行时版本与技能发布版本不一致。');
+  }
   const output = path.resolve(outputDirectory, `${skillName}-v${version}.zip`);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), `${skillName}-pack-`));
   const archive = path.join(directory, 'release.zip');
   const manifest = path.join(directory, bundleName);
   try {
-    const files = Object.fromEntries(Object.keys(inventory(root)).map(name =>
+    const files = Object.fromEntries(Object.keys(sourceFiles(root)).map(name =>
       [name, fs.readFileSync(path.join(root, name)).toString('base64')]));
     fs.writeFileSync(manifest, JSON.stringify({ schemaVersion: 1, name: skillName, version, files }), { flag: 'wx' });
     if (process.platform === 'win32') execFileSync('tar.exe', ['-a', '-cf', archive, bundleName], { cwd: directory });

@@ -164,8 +164,10 @@ test('candidate apply shares version protection with direct editing', async t =>
   const proposed = JSON.parse(fs.readFileSync(candidate.modelFile, 'utf8'));
   proposed.nodes.find(item => item.id === 'validate').title = 'Agent 的旧建议';
   fs.writeFileSync(candidate.modelFile, JSON.stringify(proposed));
+  const { reviewHash } = store.reviewCandidate(candidate.candidateId);
   await store.edit(guard(store, { nodeId: 'validate', title: '用户刚修改的名称', intent: 'current' }));
-  await assert.rejects(async () => store.applyCandidate({ candidateId: candidate.candidateId, requestId: randomUUID() }), error => error.status === 409 || error.statusCode === 409);
+  assert.throws(() => store.reviewCandidate(candidate.candidateId), { status: 409 });
+  assert.throws(() => store.applyCandidate({ candidateId: candidate.candidateId, reviewHash }), { status: 409 });
   assert.equal(node(store.read()).title, '用户刚修改的名称');
   assert.equal(JSON.parse(fs.readFileSync(candidate.modelFile, 'utf8')).nodes.find(item => item.id === 'validate').title, 'Agent 的旧建议');
 });
@@ -177,11 +179,39 @@ test('a valid candidate updates the same durable model and does not rewrite sour
   const proposed = JSON.parse(fs.readFileSync(candidate.modelFile, 'utf8'));
   proposed.nodes.find(item => item.id === 'validate').title = 'Agent 整理后的检查步骤';
   fs.writeFileSync(candidate.modelFile, JSON.stringify(proposed));
-  await store.applyCandidate({ candidateId: candidate.candidateId, requestId: randomUUID() });
+  await store.applyCandidate(store.reviewCandidate(candidate.candidateId));
   const restored = createStore(task, { model: createDemoModel() }).read();
   assert.equal(node(restored).title, 'Agent 整理后的检查步骤');
   assert.deepEqual(restored.model.sources, sources);
   assert.equal(validateModel(restored.model).ok, true);
+});
+
+test('review reports the exact candidate changes and only an unchanged reviewed candidate can be applied', t => {
+  const { store } = setup(t);
+  const { candidateId, modelFile } = store.createCandidate();
+  const model = JSON.parse(fs.readFileSync(modelFile, 'utf8'));
+  const target = model.nodes.find(entry => entry.id === 'validate');
+  target.title = '第一次展示的名称';
+  fs.writeFileSync(modelFile, JSON.stringify(model));
+
+  const initial = store.read();
+  const review = store.reviewCandidate(candidateId);
+  assert.deepEqual(store.read(), initial);
+  assert.equal(review.changes.find(change => change.type === 'node' && change.id === 'validate').after.title, target.title);
+  assert.ok(review.evidence.before.claims.some(entry => entry.id === 'validate-actions'));
+  assert.throws(() => store.applyCandidate({ candidateId }), { status: 409 });
+
+  target.title = '展示后更改的名称';
+  fs.writeFileSync(modelFile, JSON.stringify(model));
+  assert.throws(() => store.applyCandidate(review), { status: 409 });
+  assert.deepEqual(store.read(), initial);
+
+  const latestReview = store.reviewCandidate(candidateId);
+  assert.notEqual(latestReview.reviewHash, review.reviewHash);
+  const applied = store.applyCandidate(latestReview);
+  assert.equal(node(applied).title, target.title);
+  assert.deepEqual(store.applyCandidate(latestReview), applied);
+  assert.throws(() => store.applyCandidate(review), { status: 409 });
 });
 
 test('direct editing refuses a shared claim rather than silently changing another node', async t => {
@@ -295,7 +325,7 @@ test('Agent rule edits appear in the difference list and identify the related no
   const proposed = JSON.parse(fs.readFileSync(candidate.modelFile, 'utf8'));
   proposed.rules.find(item => item.id === 'test-linked-rule').parameters.basis = ['calculate-actions'];
   fs.writeFileSync(candidate.modelFile, JSON.stringify(proposed));
-  const state = await store.applyCandidate({ candidateId: candidate.candidateId, requestId: randomUUID() });
+  const state = await store.applyCandidate(store.reviewCandidate(candidate.candidateId));
   const change = state.changes[0];
   assert.ok(change.items.some(item => item.type === 'rule' && item.id === 'test-linked-rule'));
   assert.ok(change.nodeIds.includes('validate'));
@@ -319,7 +349,7 @@ test('a changed premise identifies nodes using its inferred dependent claim', as
   // dependency visibility rather than inventing a new business assertion.
   proposed.claims.find(item => item.id === 'validate-actions').text = '检查价格字段的有效性，按降幅判断审批要求。';
   fs.writeFileSync(candidate.modelFile, JSON.stringify(proposed));
-  const state = await store.applyCandidate({ candidateId: candidate.candidateId, requestId: randomUUID() });
+  const state = await store.applyCandidate(store.reviewCandidate(candidate.candidateId));
   assert.ok(state.changes[0].nodeIds.includes('validate'));
   assert.ok(state.changes[0].nodeIds.includes('calculate'));
 });

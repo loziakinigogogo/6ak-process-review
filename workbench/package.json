@@ -1,6 +1,6 @@
 {
   "name": "6ak-process-review-workbench",
-  "version": "0.1.4-dev.0",
+  "version": "0.1.4",
   "private": true,
-  "description": "0.1.4 本地流程工作台开发基线，尚未并入正式 skill"
+  "description": "6ak 流程工作台开发入口，正式运行时随 skill 发布"
 }

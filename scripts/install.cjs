@@ -36,6 +36,18 @@ function plainDirectory(directory) {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('需要普通目录 ' + directory);
 }
 
+// Select runtime payload separately from the complete integrity inventory, so
+// omitted development tests never hide user additions in an installed copy.
+function sourceFiles(root = skillRoot) {
+  const files = Object.fromEntries(Object.entries(inventory(root)).filter(([name]) =>
+    !/(?:^|\/)(?:[^/]+\.test\.cjs|selftest\.cjs)$/.test(name)));
+  if (!files['workbench/scripts/workbench.cjs'] || !files['workbench/frontend/build/index.html'] ||
+      !Object.keys(files).some(name => /^workbench\/frontend\/build\/assets\/elk-worker\.min-.*\.js$/.test(name))) {
+    throw new Error('技能工作台资源未构建完整；维护仓库请先运行 npm run demo:build，再安装或打包。');
+  }
+  return files;
+}
+
 function install(projectDirectory, release) {
   const projectRoot = fs.realpathSync(projectDirectory);
   plainDirectory(projectRoot);
@@ -52,7 +64,7 @@ function install(projectDirectory, release) {
   let staging;
   try {
     const { version } = release ?? JSON.parse(fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'));
-    const files = release?.files ?? inventory(skillRoot);
+    const files = release?.files ?? sourceFiles();
     const source = release ? { release: release.source } : { sourceDirectory: sourceRoot };
     const receipt = { schemaVersion: 1, name: skillName, version, ...source, files };
     if (fs.existsSync(target)) {
@@ -73,7 +85,11 @@ function install(projectDirectory, release) {
         fs.writeFileSync(file, bytes, { flag: 'wx' });
       }
     } else {
-      fs.cpSync(skillRoot, staging, { recursive: true, dereference: false });
+      for (const name of Object.keys(files)) {
+        const file = path.join(staging, name);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.copyFileSync(path.join(skillRoot, name), file, fs.constants.COPYFILE_EXCL);
+      }
     }
     if (!isDeepStrictEqual(inventory(staging), files)) throw new Error('复制期间维护源发生变化，请重试');
     fs.writeFileSync(path.join(staging, receiptName), JSON.stringify(receipt, null, 2) + '\n');
@@ -194,7 +210,7 @@ async function main(args) {
   console.log(JSON.stringify(install(project, release), null, 2));
 }
 
-module.exports = { install, inventory, readRelease, fetchRelease, skillName, bundleName, versionPattern, sha256 };
+module.exports = { install, inventory, sourceFiles, readRelease, fetchRelease, skillName, bundleName, versionPattern, sha256 };
 if (require.main === module) {
   main(process.argv.slice(2)).catch(error => {
     console.error(error.message);

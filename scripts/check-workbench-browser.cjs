@@ -1,248 +1,84 @@
 'use strict';
-
-const fs = require('node:fs');
-const path = require('node:path');
-const assert = require('node:assert/strict');
-const { randomUUID } = require('node:crypto');
-const { chromium, expect } = require('@playwright/test');
-const { startServer } = require('../workbench/scripts/workbench.cjs');
-
-async function main() {
-  const { getGraphScope } = await import('../workbench/frontend/src/graph-scope.mjs');
-  const directory = path.resolve('.qa', 'workbench-browser', `run-${Date.now()}`);
-  fs.mkdirSync(directory, { recursive: true });
-  let app = await startServer({ taskDirectory: path.join(directory, 'task') });
-  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : undefined);
-  const browser = await chromium.launch({ executablePath, headless: true, args: ['--use-mock-keychain', '--password-store=basic'] });
-  const checks = [], errors = [];
-  let page;
-  try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
-    page = await context.newPage();
-    page.on('pageerror', error => errors.push(error.message));
-    const state = () => fetch(app.url + '/api/workbench/state').then(r => r.json());
-    const mutate = async (route, body, expected = 200) => {
-      const response = await fetch(app.url + '/api/workbench/' + route, { method: 'POST', headers: { Origin: app.url, 'Content-Type': 'application/json', 'X-Workbench-Id': app.runtime.workspaceId }, body: JSON.stringify(body) });
-      const result = await response.json();
-      assert.equal(response.status, expected, JSON.stringify(result));
-      return result;
-    };
-    const title = () => page.getByTestId('node-title');
-    const save = () => page.getByTestId('save-node');
-    const check = name => { checks.push(name); console.log('PASS ' + name); };
-
-    await page.goto(app.url);
-    await expect(page.getByTestId('graph-node-validate')).toBeVisible();
-    const initialState = await state();
-    const initialScope = getGraphScope(initialState.model, 'execute');
-    await expect(page.locator('.process-card')).toHaveCount(initialScope.nodes.length);
-    await page.getByTestId('graph-node-validate').click();
-    await expect(title()).toHaveValue('校验降幅');
-    await page.screenshot({ path: path.join(directory, '01-initial.png') });
-    check('initial graph and selected node render');
-
-    for (const node of initialScope.contextNodes) await expect(page.getByTestId('graph-node-' + node.id)).toHaveAttribute('data-context', 'true');
-    for (const edge of initialScope.crossGroupRelations) await expect(page.locator(`.react-flow__edge[data-id="${edge.id}"]`)).toHaveCount(1);
-    const outside = initialScope.contextNodes[0];
-    assert.ok(outside, 'synthetic group must exercise a cross-group connection');
-    const insideColor = await page.getByTestId('graph-node-validate').locator('.group-badge').evaluate(el => getComputedStyle(el).backgroundColor);
-    const outsideColor = await page.getByTestId('graph-node-' + outside.id).locator('.group-badge').evaluate(el => getComputedStyle(el).backgroundColor);
-    assert.notEqual(insideColor, outsideColor);
-    await expect(page.getByTestId('graph-node-' + outside.id)).toContainText('组外');
-    check('one-hop cross-group nodes and their links are shown with group identity');
-
-    const navigation = page.getByTestId('group-navigator');
-    const navBefore = await navigation.boundingBox();
-    const quietSurface = await navigation.evaluate(el => getComputedStyle(el).backgroundColor);
-    await navigation.hover();
-    await expect.poll(() => navigation.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe(quietSurface);
-    await page.getByRole('button', { name: '缩小', exact: true }).click();
-    const navAfter = await navigation.boundingBox();
-    assert.equal(navBefore.x, navAfter.x); assert.equal(navBefore.y, navAfter.y);
-    assert.equal(await page.locator('.navigation-rail').count(), 0);
-    const graphBox = await page.getByTestId('graph-canvas').boundingBox();
-    assert.equal(graphBox.x, 0); assert.ok(graphBox.width >= 1000); assert.ok(graphBox.y <= 100);
-    check('group navigation floats over the enlarged canvas and responds to hover');
-
-    await page.getByRole('button', { name: '适应当前图', exact: true }).click();
-    await page.getByTestId('graph-node-' + outside.id).click();
-    await expect(title()).toHaveValue(outside.title);
-    await expect(page.getByTestId('group-execute')).toHaveAttribute('aria-current', 'page');
-    await page.getByTestId('jump-to-group').click();
-    await expect(page.getByTestId('group-' + outside.groupId)).toHaveAttribute('aria-current', 'page');
-    await page.getByTestId('group-execute').click();
-    await page.getByTestId('graph-node-validate').click();
-    assert.equal((await state()).modelHash, initialState.modelHash);
-    check('outside nodes can be inspected in place and explicitly opened in their own group');
-
-    await title().fill('核对本轮降幅');
-    await page.getByTestId('condition-validate--dispatch-condition').fill('降幅 ≤ 25%');
-    await page.getByTestId('condition-validate--approval-condition').fill('降幅 > 25%');
-    await save().click();
-    await expect(save()).toBeDisabled();
-    await expect.poll(async () => (await state()).model.nodes.find(n => n.id === 'validate').title).toBe('核对本轮降幅');
-    await expect(page.getByTestId('graph-node-validate')).toContainText('核对本轮降幅');
-    await page.reload();
-    await expect(title()).toHaveValue('核对本轮降幅');
-    assert.ok((await state()).model.claims.some(c => c.text === '降幅 ≤ 25%'));
-    check('node title and both branch conditions persist and reload');
-
-    await title().fill('尚未提交的用户输入');
-    await expect.poll(async () => Object.values(app.store.buffers('local-reviewer')).some(b => b.draft.title === '尚未提交的用户输入')).toBe(true);
-    await page.getByTestId('graph-node-manual').click();
-    await page.getByTestId('graph-node-validate').click();
-    await expect(title()).toHaveValue('尚未提交的用户输入');
-    await page.reload();
-    await expect(title()).toHaveValue('尚未提交的用户输入');
-    check('unfinished input survives node switching and reload');
-
-    await page.getByLabel('修改性质').selectOption('proposal');
-    await save().click();
-    await expect.poll(async () => (await state()).pendingEdits.length).toBe(1);
-    assert.equal((await state()).model.nodes.find(n => n.id === 'validate').title, '核对本轮降幅');
-    await expect(title()).toHaveValue('尚未提交的用户输入');
-    await expect(save()).toBeEnabled();
-    await page.getByLabel('修改性质').selectOption('current');
-    await save().click();
-    await expect(save()).toBeDisabled();
-    assert.equal((await state()).pendingEdits.length, 0);
-    check('pending proposal is separate, preserved, and can be adopted');
-
-    const oldCandidate = await mutate('candidates', {});
-    await title().fill('用户的新版本');
-    await save().click();
-    await expect(save()).toBeDisabled();
-    await mutate('apply', { candidateId: oldCandidate.candidateId }, 409);
-    assert.equal((await state()).model.nodes.find(n => n.id === 'validate').title, '用户的新版本');
-    check('stale Agent candidate cannot overwrite a user save');
-
-    await title().fill('Agent 更新期间继续输入');
-    const candidate = await mutate('candidates', {});
-    const model = JSON.parse(fs.readFileSync(candidate.modelFile, 'utf8'));
-    model.nodes.find(n => n.id === 'manual').title = 'Agent 整理后的单条录入';
-    fs.writeFileSync(candidate.modelFile, JSON.stringify(model, null, 2));
-    await mutate('apply', { candidateId: candidate.candidateId, summary: '浏览器验证：改名但保留原来源' });
-    await expect(page.getByTestId('graph-node-manual')).toContainText('Agent 整理后的单条录入');
-    await expect(title()).toHaveValue('Agent 更新期间继续输入');
-    check('Agent update arrives through SSE without erasing current input');
-    await page.getByRole('button', { name: '还原输入', exact: true }).click();
-    await expect(save()).toBeDisabled();
-
-    let releaseResponse;
-    const held = new Promise(resolve => { releaseResponse = resolve; });
-    let saveArrived;
-    const arrived = new Promise(resolve => { saveArrived = resolve; });
-    await page.route('**/api/workbench/edits', async route => {
-      const response = await route.fetch(); saveArrived(); await held; await route.fulfill({ response });
-    });
-    await title().fill('提交时的标题');
-    await save().click();
-    await arrived;
-    await title().fill('保存期间新输入的标题');
-    releaseResponse();
-    await expect(save()).toBeEnabled();
-    await expect(title()).toHaveValue('保存期间新输入的标题');
-    assert.equal((await state()).model.nodes.find(n => n.id === 'validate').title, '提交时的标题');
-    await page.unroute('**/api/workbench/edits');
-    await save().click();
-    await expect(save()).toBeDisabled();
-    assert.equal((await state()).model.nodes.find(n => n.id === 'validate').title, '保存期间新输入的标题');
-    check('typing during an in-flight save is retained and remains saveable');
-
-    const beforeReference = await state();
-    await expect(page.getByTestId('discussion-input')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: '讨论', exact: true })).toHaveCount(0);
-    await page.getByTestId('copy-reference').click();
-    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('process-review-workbench-ref:v1');
-    let copied = await page.evaluate(() => navigator.clipboard.readText());
-    let referenceRecord = JSON.parse(copied.split('process-review-workbench-ref:v1 ')[1]);
-    const snapshot = await fetch(app.url + '/api/workbench/references/' + referenceRecord.referenceId).then(r => r.json());
-    assert.equal(snapshot.targets[0].id, 'validate');
-    assert.equal((await state()).modelHash, beforeReference.modelHash);
-    assert.equal((await state()).workRevision, beforeReference.workRevision);
-    assert.deepEqual((await state()).requests, beforeReference.requests);
-    check('copying a node reference needs no webpage chat and does not change business content');
-
-    const action = page.getByLabel('操作说明 1', { exact: true });
-    const selectedText = (await action.inputValue()).slice(0, 10);
-    await action.evaluate(el => { el.focus(); el.setSelectionRange(0, 10); el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); });
-    await page.getByRole('button', { name: '复制所选文字引用', exact: true }).click();
-    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('claim');
-    copied = await page.evaluate(() => navigator.clipboard.readText());
-    referenceRecord = JSON.parse(copied.split('process-review-workbench-ref:v1 ')[1]);
-    const quote = await fetch(app.url + '/api/workbench/references/' + referenceRecord.referenceId).then(r => r.json());
-    assert.equal(quote.selection.text, selectedText);
-    check('selected saved wording produces an exact claim reference');
-    await page.screenshot({ path: path.join(directory, '02-reference.png') });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: path.join(directory, '03-narrow.png') });
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    check('narrow viewport has no document overflow');
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await title().fill('网络失败时仍保留的输入');
-    await page.route('**/api/workbench/edits', route => route.abort('failed'));
-    await save().click();
-    await expect(page.locator('.save-error')).toBeVisible();
-    await expect(title()).toHaveValue('网络失败时仍保留的输入');
-    assert.equal((await state()).model.nodes.find(n => n.id === 'validate').title, '保存期间新输入的标题');
-    await page.unroute('**/api/workbench/edits');
-    await save().click();
-    await expect(save()).toBeDisabled();
-    await page.getByTestId('undo').click();
-    await expect(title()).toHaveValue('保存期间新输入的标题');
-    check('failed save retains input and a successful edit can be undone');
-
-    const scopedPosition = snapshot => snapshot.view.layouts?.execute?.positions.manual || snapshot.view.positions.manual;
-    const beforePosition = scopedPosition(await state());
-    const dragSnapshots = [];
-    const captureDragState = async label => {
-      dragSnapshots.push(await page.evaluate(label => {
-        const node = document.querySelector('[data-testid="graph-node-manual"]');
-        const box = node.getBoundingClientRect();
-        const x = box.x + box.width / 2, y = box.y + 25;
-        const hit = document.elementFromPoint(x, y);
-        const wrapper = node.closest('.react-flow__node');
-        return { label, viewport: document.querySelector('.react-flow__viewport').getAttribute('style'), graph: document.querySelector('.graph-area').getBoundingClientRect().toJSON(), manual: box.toJSON(), wrapper: { style: wrapper.getAttribute('style'), visibility: getComputedStyle(wrapper).visibility, pointerEvents: getComputedStyle(wrapper).pointerEvents }, hit: hit?.outerHTML.slice(0, 300), hitNodeId: hit?.closest('.react-flow__node')?.getAttribute('data-id') };
-      }, label));
-      fs.writeFileSync(path.join(directory, 'drag-diagnostics.json'), JSON.stringify(dragSnapshots, null, 2));
-    };
-    await captureDragState('before-fit');
-    await page.getByRole('button', { name: '适应当前图', exact: true }).click();
-    await page.waitForTimeout(400);
-    await captureDragState('after-fit');
-    await expect(page.getByTestId('graph-node-manual')).toBeVisible();
-    assert.equal(dragSnapshots.at(-1).hitNodeId, 'manual', 'the drag must hit a visible node, not the canvas beneath it');
-    const box = await page.getByTestId('graph-node-manual').boundingBox();
-    await page.mouse.move(box.x + box.width / 2, box.y + 25);
-    await page.mouse.down();
-    await page.mouse.move(box.x + box.width / 2 + 45, box.y + 45, { steps: 8 });
-    await page.mouse.up();
-    await captureDragState('after-drag');
-    await expect.poll(async () => scopedPosition(await state()).x).not.toBe(beforePosition.x);
-    check('dragged node position persists independently of content');
-
-    await page.getByTestId('graph-node-validate').click();
-    await title().fill('跨端口重开仍能恢复的编辑稿');
-    await expect.poll(async () => Object.values(app.store.buffers('local-reviewer')).some(b => b.draft.title === '跨端口重开仍能恢复的编辑稿')).toBe(true);
-    await context.close();
-    const previousURL = app.url;
-    await app.close();
-    app = await startServer({ taskDirectory: path.join(directory, 'task') });
-    const freshContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-    page = await freshContext.newPage();
-    page.on('pageerror', error => errors.push(error.message));
-    await page.goto(app.url);
-    await expect(title()).toHaveValue('跨端口重开仍能恢复的编辑稿');
-    assert.notEqual(app.url, previousURL);
-    check('server restart on another port restores file-backed input without browser cache');
-    assert.deepEqual(errors, []);
-    fs.writeFileSync(path.join(directory, 'summary.json'), JSON.stringify({ checks, errors, passed: true, taskDirectory: app.runtime.taskDirectory }, null, 2));
-    console.log('BROWSER_QA=' + directory);
-  } catch (error) {
-    if (page) await page.screenshot({ path: path.join(directory, 'failure.png') }).catch(() => {});
-    fs.writeFileSync(path.join(directory, 'summary.json'), JSON.stringify({ checks, errors, passed: false, error: error.stack }, null, 2));
-    console.error('BROWSER_QA=' + directory);
-    throw error;
-  } finally { await browser.close(); await app.close(); }
+// The prior 21 checks are mapped to the material-first workflow, retaining
+// persistence, reference, concurrency, failure, undo and layout assertions.
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {randomUUID}=require('node:crypto'),{execFile}=require('node:child_process');
+const {chromium,expect}=require('@playwright/test');
+const {startServer}=require('../workbench/scripts/workbench.cjs');
+const coverageMap=[
+ ['contextual Agent entry','selected graph node → materials, no graph processing menu'],
+ ['initial browse','initial graph and read-only result'],['card/details/source','complete action and source locations'],
+ ['five presets','one complete regeneration task, cancel writes nothing'],['relation target','keyboard relation reference with endpoints'],
+ ['one-hop context','cross-group nodes/edges'],['floating navigation','hover and viewport independence'],['outside group','inspect and explicitly jump'],
+ ['direct wording save','raw original words → reference → CLI candidate/review/apply → three projections'],['draft restore','A/B raw input isolation and refresh'],
+ ['proposal adoption','proposal reference-only until explicit fact revision and candidate adoption'],['stale candidate','material changes reject reviewed candidate'],
+ ['SSE input preservation','candidate update does not erase raw draft'],['in-flight input','A response cannot close/overwrite B editor'],
+ ['copy reference','read-only copy, no embedded chat'],['exact quote','saved wording and claim identity'],
+ ['task preview','cancel, task editing, all materials, stale refresh, explicit copy'],['narrow','no overflow, tools reachable'],
+ ['failure/undo','lost response retry idempotence and candidate undo keeps materials'],['drag','layout independent of content'],
+ ['restart','new port/fresh browser restores file-backed raw draft'],
+];
+async function main(){
+ const {getGraphScope}=await import('../workbench/frontend/src/graph-scope.mjs');
+ const directory=path.resolve('.qa','workbench-browser',`run-${Date.now()}`),taskDirectory=path.join(directory,'task');fs.mkdirSync(directory,{recursive:true});
+ let app=await startServer({taskDirectory});
+ const browser=await chromium.launch({executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||(process.platform==='win32'?'C:/Program Files/Google/Chrome/Application/chrome.exe':undefined),headless:true,args:['--use-mock-keychain','--password-store=basic']});
+ const checks=[],errors=[];let page,context;
+ const state=()=>fetch(app.url+'/api/workbench/state').then(r=>r.json());
+ const mutate=async(route,body,status=200)=>{const r=await fetch(app.url+'/api/workbench/'+route,{method:'POST',headers:{Origin:app.url,'Content-Type':'application/json','X-Workbench-Id':app.runtime.workspaceId},body:JSON.stringify(body)}),value=await r.json();assert.equal(r.status,status,JSON.stringify(value));return value;};
+ const cli=(...args)=>new Promise((resolve,reject)=>execFile(process.execPath,[path.resolve('workbench/scripts/workbench.cjs'),...args,'--task',taskDirectory],{encoding:'utf8'},(error,stdout,stderr)=>{if(error)return reject(new Error(stderr||error.message));try{resolve(JSON.parse(stdout));}catch(cause){reject(cause);}}));
+ const check=(index,message)=>{checks.push({index,from:coverageMap[index-1][0],message});console.log('PASS '+index+' '+message);};
+ const row=id=>page.locator(`[data-content-node-id="${id}"]`),words=()=>page.getByLabel('补充原话',{exact:true});
+ const graph=async()=>{await page.getByTestId('view-graph').click();await expect(page.getByTestId('graph-canvas')).toHaveAttribute('aria-busy','false',{timeout:30000});};
+ const fit=async()=>{if(!await page.getByRole('button',{name:'适应当前图',exact:true}).isVisible())await page.getByRole('button',{name:'图工具',exact:true}).click();await page.getByRole('button',{name:'适应当前图',exact:true}).click();await page.waitForTimeout(250);};
+ const select=async id=>{await graph();await fit();await page.getByTestId('graph-node-'+id).click();};
+ const contentNode=async id=>{await page.getByTestId('view-content').click();await expect(page.getByTestId('node-workspace')).toBeVisible();if(await page.getByTestId('node-workspace').getAttribute('data-current-node-id')!==id){if(!await page.getByTestId('node-directory').isVisible())await page.getByTestId('directory-toggle').click();await page.getByTestId('directory-node-'+id).click();await expect(page.getByTestId('node-workspace')).toHaveAttribute('data-current-node-id',id);}};
+ const compose=async id=>{await contentNode(id);await row(id).getByTestId('add-content-note').click();await expect(page.getByTestId('content-composer')).toHaveAttribute('data-editor-node-id',id);return words();};
+ const discard=async()=>{if(await page.getByRole('button',{name:'放弃输入',exact:true}).isVisible())await page.getByRole('button',{name:'放弃输入',exact:true}).click();};
+ const saveWords=async(id,text,kind='raw')=>{
+  if(kind==='raw'){
+   await (await compose(id)).fill(text);await expect(page.getByLabel('补充性质',{exact:true})).toBeHidden();await page.getByTestId('save-content').click();await expect(page.getByTestId('content-composer')).toHaveCount(0);
+  }else{
+   // Classified records exercise legacy compatibility; the new entry path
+   // intentionally does not ask users to categorize their words.
+   await contentNode(id);const current=await state();await mutate('content',{requestId:randomUUID(),operation:'create',nodeId:id,entryType:'note',kind,title:'',text,baseContentRevision:current.contentTree.revision});
+  }
+  await expect.poll(async()=>(await state()).contentTree.entries.some(e=>e.nodeId===id&&e.text===text)).toBe(true);return(await state()).contentTree.entries.find(e=>e.nodeId===id&&e.text===text);
+ };
+ const readCopied=async()=>{const copied=await page.evaluate(()=>navigator.clipboard.readText()),line=copied.split('\n').find(line=>line.startsWith('process-review-workbench-ref:v1 '));assert.ok(line,copied);const header=JSON.parse(line.slice('process-review-workbench-ref:v1 '.length));return{copied,header,snapshot:await fetch(app.url+'/api/workbench/references/'+header.referenceId).then(r=>r.json())};};
+ const handoff=async id=>{await contentNode(id);await row(id).getByTestId('refine-node-materials').click();await expect(page.getByTestId('agent-task-preview')).toBeVisible();};
+ const copiedHandoff=async id=>{await handoff(id);await page.getByTestId('confirm-agent-task').click();await expect(page.getByTestId('agent-task-preview')).toHaveCount(0);return readCopied();};
+ const addClaim=(model,source,id,text)=>{if(!model.sources.some(s=>s.id===source.id))model.sources.push(source);const endLine=source.text.split('\n').length;model.claims.push({id,text,origin:'explicit',evidence:[{sourceId:source.id,startLine:1,endLine,quote:source.text}]});const existing=model.coverage.find(c=>c.sourceId===source.id);if(existing)existing.claimIds.push(id);else model.coverage.push({sourceId:source.id,startLine:1,endLine,disposition:'represented',claimIds:[id],issueIds:[],reason:'本次已确认的合成用户原话'});return id;};
+ const applyModel=async(referenceId,change)=>{const candidate=await cli('candidate','--reference',referenceId),model=JSON.parse(fs.readFileSync(candidate.modelFile,'utf8'));change(model,candidate);fs.writeFileSync(candidate.modelFile,JSON.stringify(model,null,2));const review=await cli('review-candidate',candidate.candidateId);assert.ok(review.changes.length>0);await cli('apply',candidate.candidateId,'--confirm',review.reviewHash);return{candidate,review};};
+ try{
+  context=await browser.newContext({viewport:{width:1440,height:900},permissions:['clipboard-read','clipboard-write']});page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));await page.goto(app.url);await graph();
+  const initial=await state(),scope=getGraphScope(initial.model,'execute');
+  await expect(page.getByRole('group',{name:'主视图'})).toBeVisible();await expect(page.getByRole('group',{name:'工作形态'})).toHaveCount(0);await expect(page.getByTestId('agent-action')).toHaveCount(0);await expect(page.getByTestId('supplement-node')).toHaveCount(0);
+  await page.getByTestId('organize-node').click();await expect(row('validate')).toHaveAttribute('data-selected','true');await expect(row('validate').locator('[data-node-section="materials"]')).toBeVisible();await graph();await page.locator('.react-flow__pane').dispatchEvent('click');await expect(page.getByTestId('organize-node')).toHaveCount(0);await select('validate');check(1,'business processing starts in the selected node materials');
+  await expect(page.locator('.process-card')).toHaveCount(scope.nodes.length);await expect(page.getByTestId('node-title')).toHaveValue('校验降幅');await expect(page.getByTestId('node-title')).not.toBeEditable();await expect(page.getByTestId('edit-copy')).toHaveCount(0);await expect(page.getByTestId('expression-title')).toHaveCount(0);await page.screenshot({path:path.join(directory,'01-initial.png')});check(2,'initial graph and current result are read-only');
+  const action=initial.model.claims.find(c=>c.id==='validate-actions'),rule=initial.model.claims.find(c=>c.id==='validate-rules');await expect(page.getByTestId('graph-node-validate').locator('.node-actions [data-claim-id]')).toHaveText(action.text);await expect(page.getByTestId('graph-node-validate')).not.toContainText(rule.text);await page.getByTestId('graph-node-validate').getByRole('button',{name:'查看节点详情',exact:true}).click();await expect(page.getByTestId('node-details').getByLabel('注意事项 1',{exact:true})).toHaveValue(rule.text);await expect(page.getByTestId('node-details').getByLabel('注意事项 1',{exact:true})).not.toBeEditable();await page.getByTestId('node-details').locator('summary').click();await expect(page.getByTestId('node-details').getByLabel('注意事项 1',{exact:true})).toBeHidden();await expect(page.getByTestId('source-locations').locator('.source-location')).toHaveCount(1);await expect(page.getByTestId('source-locations')).not.toContainText(action.text);await expect(page.getByTestId('source-locations').locator('blockquote')).toHaveCount(0);check(3,'real actions, expandable details and source positions remain distinct');
+  const beforeCancel=await state();await handoff('validate');await expect(page.getByTestId('agent-task-targets')).toContainText('校验降幅');await expect(page.getByTestId('agent-task-text')).toHaveValue(/全部有效节点材料/);await page.getByTestId('cancel-agent-task').click();assert.equal((await state()).modelHash,beforeCancel.modelHash);assert.equal((await state()).workRevision,beforeCancel.workRevision);assert.deepEqual((await state()).requests,beforeCancel.requests);await expect(page.getByTestId('add-node')).toHaveCount(0);await expect(page.getByTestId('add-relation')).toHaveCount(0);check(4,'one regeneration task replaces processing presets; cancellation changes no content');
+  await select('validate');const branch=page.getByTestId('select-relation-validate--dispatch');await branch.press('Enter');await expect(branch).toHaveAttribute('aria-pressed','true');await expect(page.getByTestId('node-title')).toHaveValue('校验降幅');await page.getByTestId('copy-reference').click();await expect.poll(()=>page.evaluate(()=>navigator.clipboard.readText())).toContain('validate--dispatch');const relationRef=await readCopied();assert.equal(relationRef.snapshot.targets[0].id,'validate--dispatch');for(const id of ['validate','dispatch'])assert.ok(relationRef.snapshot.context.nodes.some(n=>n.id===id));check(5,'keyboard relation reference preserves source and both endpoints');
+  for(const node of scope.contextNodes)await expect(page.getByTestId('graph-node-'+node.id)).toHaveAttribute('data-context','true');for(const edge of scope.crossGroupRelations)await expect(page.locator(`.react-flow__edge[data-id="${edge.id}"]`)).toHaveCount(1);const outside=scope.contextNodes[0];assert.ok(outside);const color=id=>page.getByTestId('graph-node-'+id).locator('.group-badge').evaluate(el=>getComputedStyle(el).getPropertyValue('--group-color'));assert.notEqual(await color('validate'),await color(outside.id));await expect(page.getByTestId('graph-node-'+outside.id)).toContainText('组外');check(6,'one-hop cross-group nodes and links keep their identity');
+  const nav=page.getByTestId('group-navigator'),navBefore=await nav.boundingBox(),quiet=await nav.evaluate(el=>getComputedStyle(el).backgroundColor);await nav.hover();await expect.poll(()=>nav.evaluate(el=>getComputedStyle(el).backgroundColor)).not.toBe(quiet);await page.getByRole('button',{name:'缩小',exact:true}).click();const navAfter=await nav.boundingBox();assert.equal(navBefore.x,navAfter.x);assert.equal(navBefore.y,navAfter.y);assert.equal(await page.locator('.navigation-rail').count(),0);const graphBox=await page.getByTestId('graph-canvas').boundingBox();assert.equal(graphBox.x,0);assert.ok(graphBox.width>=1000);assert.ok(graphBox.y<=100);check(7,'navigation floats over the enlarged canvas independently of zoom');
+  await select(outside.id);await expect(page.getByTestId('node-title')).toHaveValue(outside.title);await expect(page.getByTestId('group-execute')).toHaveAttribute('aria-current','page');await page.getByTestId('jump-to-group').click();await expect(page.getByTestId('group-'+outside.groupId)).toHaveAttribute('aria-current','page');await page.getByTestId('group-execute').click();await select('validate');assert.equal((await state()).modelHash,initial.modelHash);check(8,'outside nodes can be inspected in place and explicitly opened in their group');
+  const factText='本次明确更正：节点名称为核对本轮降幅；按出口条件选择路径，复核等号边界；降幅不超过30%直接下发，超过30%审批。',fact=await saveWords('validate',factText);assert.equal((await state()).modelHash,initial.modelHash);const ref=await copiedHandoff('validate');assert.ok(ref.snapshot.contentInputs.some(e=>e.id===fact.id&&e.kind==='raw'));
+  await applyModel(ref.header.referenceId,(model,candidate)=>{const source=candidate.rawMaterialSources.find(s=>s.text===factText),node=model.nodes.find(n=>n.id==='validate');node.title='核对本轮降幅';const ruleId=addClaim(model,source,'qa-material-rule','按出口条件选择路径，复核等号边界。');node.fields.rules=[ruleId];node.claimIds.push(ruleId);for(const[id,text]of[['validate--dispatch','降价幅度 ≤ 30%'],['validate--approval','降价幅度 > 30%']]){const relation=model.relations.find(r=>r.id===id),claimId=addClaim(model,source,'qa-'+id,text);relation.conditionClaimIds=[claimId];relation.claimIds=[claimId];}});
+  await expect(row('validate').getByTestId('workspace-node-title')).toHaveText('核对本轮降幅');await expect(row('validate').locator('[data-node-section="rules"]')).toContainText('复核等号边界');await graph();await expect(page.getByTestId('graph-node-validate')).toContainText('核对本轮降幅');await expect(page.getByTestId('node-title')).toHaveValue('核对本轮降幅');await page.reload();await graph();await expect(page.getByTestId('condition-qa-validate--dispatch')).toHaveValue('降价幅度 ≤ 30%');const topology=model=>model.relations.map(({id,type,from,to})=>({id,type,from,to}));assert.deepEqual(topology((await state()).model),topology(initial.model));assert.ok((await state()).contentTree.entries.find(e=>e.id===fact.id).adoptedRevisions.includes(1));check(9,'real CLI candidate/review/apply updates graph, body and preview with fact evidence');
+  await (await compose('validate')).fill('节点A尚未保存的原话');await (await compose('manual')).fill('节点B独立未保存的原话');await expect(await compose('validate')).toHaveValue('节点A尚未保存的原话');await page.reload();await expect(await compose('validate')).toHaveValue('节点A尚未保存的原话');await expect(await compose('manual')).toHaveValue('节点B独立未保存的原话');await discard();await compose('validate');await discard();check(10,'per-node raw drafts survive switching and refresh without leaking');
+  const proposal=await saveWords('validate','建议将责任改为复核专员，尚未确认。','proposal'),proposalRef=await copiedHandoff('validate'),proposalCandidate=await cli('candidate','--reference',proposalRef.header.referenceId);assert.ok(proposalRef.snapshot.contentInputs.some(e=>e.id===proposal.id&&e.kind==='proposal'));assert.ok(!proposalCandidate.feedbackSources.some(s=>s.text===proposal.text));const originalModel=(await state()).modelHash;await row('validate').locator(`[data-content-id="${proposal.id}"]`).getByRole('button',{name:'修订原话',exact:true}).click();await page.getByTestId('content-composer').getByText('更多信息',{exact:true}).click();await page.getByLabel('补充性质',{exact:true}).selectOption('fact');await words().fill('已确认：这一步由复核专员负责。');await page.getByTestId('save-content').click();await expect(page.getByTestId('content-composer')).toHaveCount(0);assert.equal((await state()).modelHash,originalModel);const confirmed=await copiedHandoff('validate');await applyModel(confirmed.header.referenceId,(model,candidate)=>{const source=candidate.feedbackSources.find(s=>s.text==='已确认：这一步由复核专员负责。'),node=model.nodes.find(n=>n.id==='validate'),id=addClaim(model,source,'qa-confirmed-role','复核专员');node.fields.role=[id];node.claimIds.push(id);});const proposalEntry=(await state()).contentTree.entries.find(e=>e.id===proposal.id);assert.equal(proposalEntry.revisions[0].kind,'proposal');assert.ok(proposalEntry.adoptedRevisions.includes(proposalEntry.evidenceRevision));check(11,'proposal only becomes adopted after an explicit fact revision; original history remains');
+  const old=await cli('candidate'),oldModel=JSON.parse(fs.readFileSync(old.modelFile,'utf8'));oldModel.nodes.find(n=>n.id==='manual').title='过期候选不应采用';fs.writeFileSync(old.modelFile,JSON.stringify(oldModel));const oldReview=await cli('review-candidate',old.candidateId);await saveWords('validate','新增材料使旧候选失效。','reminder');await mutate('apply',{candidateId:old.candidateId,reviewHash:oldReview.reviewHash},409);assert.notEqual((await state()).model.nodes.find(n=>n.id==='manual').title,'过期候选不应采用');check(12,'material updates reject an already reviewed stale candidate');
+  await (await compose('validate')).fill('Agent采用期间仍在输入的原话');const sseRef=await copiedHandoff('manual');await applyModel(sseRef.header.referenceId,model=>{model.nodes.find(n=>n.id==='manual').title='Agent整理后的单条录入';});await expect(row('manual').getByTestId('workspace-node-title')).toHaveText('Agent整理后的单条录入');await expect(await compose('validate')).toHaveValue('Agent采用期间仍在输入的原话');await discard();check(13,'SSE result updates preserve unsaved raw input');
+  let release,arrive;const held=new Promise(resolve=>release=resolve),arrived=new Promise(resolve=>arrive=resolve);await page.route('**/api/workbench/content',async route=>{const response=await route.fetch();arrive();await held;await route.fulfill({response});});await (await compose('validate')).fill('节点A提交中的原话');await page.getByTestId('save-content').click();await arrived;await (await compose('manual')).fill('节点B在A提交期间继续输入');release();await expect.poll(async()=>(await state()).contentTree.entries.some(e=>e.nodeId==='validate'&&e.text==='节点A提交中的原话')).toBe(true);await expect(words()).toHaveValue('节点B在A提交期间继续输入');await expect(page.getByTestId('content-composer')).toHaveAttribute('data-editor-node-id','manual');await page.unroute('**/api/workbench/content');if(await page.getByRole('button',{name:'已核对，继续保存',exact:true}).isVisible())await page.getByRole('button',{name:'已核对，继续保存',exact:true}).click();await page.getByTestId('save-content').click();await expect(page.getByTestId('content-composer')).toHaveCount(0);assert.ok((await state()).contentTree.entries.some(e=>e.nodeId==='manual'&&e.text==='节点B在A提交期间继续输入'));check(14,'delayed A save cannot close B editor or misattribute B input');
+  await select('validate');const beforeReference=await state();await expect(page.getByTestId('discussion-input')).toHaveCount(0);await page.getByTestId('copy-reference').click();await expect.poll(()=>page.evaluate(()=>navigator.clipboard.readText())).toContain('process-review-workbench-ref:v1');const copy=await readCopied();assert.equal(copy.snapshot.targets[0].id,'validate');assert.equal((await state()).modelHash,beforeReference.modelHash);assert.equal((await state()).workRevision,beforeReference.workRevision);assert.deepEqual((await state()).requests,beforeReference.requests);check(15,'node reference copy is read-only and requires no embedded chat');
+  const actionField=page.getByLabel('操作说明 1',{exact:true}),selectedText=(await actionField.inputValue()).slice(0,10);await actionField.evaluate(el=>{el.focus();el.setSelectionRange(0,10);el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));});await page.getByRole('button',{name:'复制所选文字引用',exact:true}).click();await expect.poll(()=>page.evaluate(()=>navigator.clipboard.readText())).toContain('引用原文');const quote=await readCopied();assert.equal(quote.snapshot.selection.text,selectedText);assert.equal(quote.snapshot.selection.claimId,'validate-actions');check(16,'selected saved wording produces an exact claim reference');
+  const preHandoff=await state(),beforeClipboard=await page.evaluate(()=>navigator.clipboard.readText());let references=0;const observe=request=>{if(request.method()==='POST'&&request.url().endsWith('/api/workbench/references'))references++;};page.on('request',observe);await handoff('validate');await expect(page.getByTestId('agent-task-text')).toBeEditable();await expect(page.getByTestId('agent-task-materials')).toContainText('新增材料使旧候选失效');await page.getByTestId('cancel-agent-task').click();assert.equal(references,0);assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),beforeClipboard);await handoff('validate');const task='按全部有效材料重新核对正文、概括与上下游条件。';await page.getByTestId('agent-task-text').fill(task);const current=await state();await mutate('content',{requestId:randomUUID(),operation:'create',nodeId:'validate',entryType:'note',kind:'question',title:'并发问题',text:'尚未确认的并发问题，不得当事实。',baseContentRevision:current.contentTree.revision});await expect(page.getByTestId('confirm-agent-task')).toBeDisabled();await page.getByTestId('refresh-agent-task').click();await expect(page.getByTestId('confirm-agent-task')).toBeEnabled();await page.getByTestId('confirm-agent-task').click();await expect(page.getByTestId('agent-task-preview')).toHaveCount(0);const refreshed=await readCopied();assert.ok(refreshed.copied.includes(task));assert.ok(refreshed.snapshot.contentInputs.some(e=>e.kind==='question'&&e.text.includes('并发问题')));assert.equal(references,1);assert.equal((await state()).modelHash,preHandoff.modelHash);page.off('request',observe);check(17,'preview cancels without writes and refreshes stale complete material references before explicit copy');
+  await page.setViewportSize({width:390,height:844});await expect(page.getByTestId('node-inspector')).toHaveCount(0);assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await graph();await page.getByRole('button',{name:'图工具',exact:true}).click();await expect(page.getByRole('button',{name:'适应当前图',exact:true})).toBeVisible();await page.getByRole('button',{name:'适应当前图',exact:true}).click();await page.screenshot({path:path.join(directory,'03-narrow.png')});await page.setViewportSize({width:1440,height:900});check(18,'narrow content has no overflow and graph tools remain reachable');
+  const failText='响应丢失仍要只保存一次的原话';await (await compose('validate')).fill(failText);await page.route('**/api/workbench/content',async route=>{await route.fetch();await route.abort('failed');});await page.getByTestId('save-content').click();await expect(page.getByTestId('retry-content-save')).toBeVisible();await expect(words()).toHaveValue(failText);await expect.poll(async()=>(await state()).contentTree.entries.filter(e=>e.text===failText).length).toBe(1);await page.unroute('**/api/workbench/content');await page.reload();await compose('validate');await expect(page.getByTestId('retry-content-save')).toBeVisible();await page.getByTestId('retry-content-save').click();await expect(page.getByTestId('content-composer')).toHaveCount(0);assert.equal((await state()).contentTree.entries.filter(e=>e.text===failText).length,1);const beforeUndo=await state();await page.getByTestId('undo').click();await expect.poll(async()=>(await state()).model.nodes.find(n=>n.id==='manual').title).not.toBe('Agent整理后的单条录入');assert.deepEqual((await state()).contentTree,beforeUndo.contentTree);check(19,'lost response retains input and retries once; candidate undo preserves later materials');
+  await select('manual');const beforeDrag=await state(),direction=await page.locator('.app-shell').getAttribute('data-layout-direction'),position=s=>(direction==='RIGHT'?s.view.horizontalLayouts:s.view.layouts)?.execute?.positions.manual||s.view.positions.manual;await fit();const point=await page.getByTestId('graph-node-manual').evaluate(node=>{const b=node.getBoundingClientRect(),x=b.x+b.width/2,y=b.y+25;return{x,y,hit:document.elementFromPoint(x,y)?.closest('.react-flow__node')?.getAttribute('data-id')};});assert.equal(point.hit,'manual');await page.mouse.move(point.x,point.y);await page.mouse.down();await page.mouse.move(point.x+45,point.y+20,{steps:8});await page.mouse.up();await expect.poll(async()=>position(await state()).x).not.toBe(position(beforeDrag).x);assert.equal((await state()).modelHash,beforeDrag.modelHash);check(20,'dragging persists layout coordinates without changing business results');
+  await (await compose('validate')).fill('跨端口重开仍可恢复的原话草稿');await expect.poll(()=>Object.values(app.store.buffers('content-editor')).some(b=>b.draft?.text==='跨端口重开仍可恢复的原话草稿')).toBe(true);await context.close();const oldURL=app.url;await app.close();app=await startServer({taskDirectory});context=await browser.newContext({viewport:{width:1440,height:900}});page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));await page.goto(app.url);await expect(await compose('validate')).toHaveValue('跨端口重开仍可恢复的原话草稿');assert.notEqual(app.url,oldURL);check(21,'fresh browser and restarted service restore file-backed material drafts across ports');
+  assert.deepEqual(errors,[]);assert.equal(checks.length,21);fs.writeFileSync(path.join(directory,'summary.json'),JSON.stringify({checks,coverageMap,errors,passed:true,taskDirectory},null,2));console.log('BROWSER_QA='+directory);
+ }catch(error){if(page)await page.screenshot({path:path.join(directory,'failure.png')}).catch(()=>{});fs.writeFileSync(path.join(directory,'summary.json'),JSON.stringify({checks,coverageMap,errors,passed:false,error:error.stack},null,2));console.error('BROWSER_QA='+directory);throw error;}
+ finally{await browser.close();await app.close();}
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+main().catch(error=>{console.error(error);process.exitCode=1;});

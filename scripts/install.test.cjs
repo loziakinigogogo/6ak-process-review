@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
-const { install, inventory, fetchRelease, readRelease } = require('./install.cjs');
+const { install, inventory, sourceFiles, fetchRelease, readRelease } = require('./install.cjs');
 const { pack } = require('./pack.cjs');
 
 function temporaryProject(t) {
@@ -24,7 +24,8 @@ test('project installation is self-contained, repeatable and protects local chan
   const project = temporaryProject(t);
   const installed = install(project);
   assert.equal(installed.status, 'installed');
-  assert.deepEqual(inventory(installed.target), inventory(path.resolve(__dirname, '../skills/6ak-process-review')));
+  assert.deepEqual(inventory(installed.target), sourceFiles(path.resolve(__dirname, '../skills/6ak-process-review')));
+  assert.ok(!Object.keys(inventory(installed.target)).some(name => name.endsWith('.test.cjs') || name.endsWith('/selftest.cjs')));
   assert.equal(install(project).status, 'unchanged');
   const extra = path.join(installed.target, 'local-notes.md');
   fs.writeFileSync(extra, 'Keep my notes');

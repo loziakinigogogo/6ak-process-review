@@ -66,6 +66,12 @@ async function main() {
     scenario = name;
     const taskDirectory = path.join(directory, name, 'task');
     app = await startServer({ taskDirectory, positions: outlierPositions(), ...options });
+    // These fixtures retain the legacy vertical initialization contract;
+    // automatic and horizontal direction are exercised in their own suite.
+    const fixtureFile = path.join(taskDirectory, 'workbench', 'state.json');
+    const fixture = JSON.parse(fs.readFileSync(fixtureFile, 'utf8'));
+    fixture.view.defaultLayoutDirection = 'DOWN';
+    fs.writeFileSync(fixtureFile, JSON.stringify(fixture, null, 2));
     tasks.push(taskDirectory);
     if (prepare) await prepare(app);
     context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -230,7 +236,7 @@ async function main() {
 
     const migratedCache = await openTask('legacy-viewport-cache', server => {
       const baseline = server.store.read();
-      server.store.updateView({ layout: { action: 'initialize', scopeId: 'execute', baseRevision: 0, baseModelHash: baseline.modelHash, positions: firstLayout.positions, routes: firstLayout.routes } });
+      server.store.updateView({ layout: { action: 'initialize', scopeId: 'execute', baseRevision: 0, baseModelHash: baseline.modelHash, positions: firstLayout.positions, routes: firstLayout.routes, inputKey: firstLayout.inputKey } });
     });
     // Seed the old cache on this origin before the application has opened. This
     // reproduces a second browser tab whose global-coordinate viewport predates
@@ -280,15 +286,19 @@ async function main() {
 
     const saved = await openTask('already-saved', server => server.store.updateView({ layout: { action: 'move', scopeId: 'execute', baseRevision: 0, positions: { manual: { x: 178, y: 82 } } } }));
     await page.goto(app.url);
+    await expect.poll(async () => typeof scoped(await state()).inputKey).toBe('string');
     await expect(page.getByTestId('arrange-layout')).toBeEnabled();
     await assertRenderedPoint('manual', scoped(saved).positions.manual);
+    const upgradedSaved = structuredClone(scoped(await state()));
+    assert.equal(upgradedSaved.revision, scoped(saved).revision + 1);
+    assert.deepEqual(upgradedSaved.positions.manual, scoped(saved).positions.manual);
     await switchGroup('prepare'); await awaitLayout('prepare');
     await switchGroup('execute'); await page.reload();
     await expect(page.getByTestId('arrange-layout')).toBeEnabled();
-    assert.deepEqual(scoped(await state()), scoped(saved));
+    assert.deepEqual(scoped(await state()), upgradedSaved);
     assert.equal(requestsFor(scenario).length, 0);
     assertContentUnchanged(saved, await state());
-    check('an existing scoped layout is never automatically replaced, even when it still contains an outlier');
+    check('an existing scoped layout upgrades once after measurement, keeps manual coordinates and stays stable on return/reload');
 
     const legacySharedPoint = { x: 43, y: 117 }, otherScopePoint = { x: 410, y: 273 };
     const sameVisible = await openTask('same-visible-scopes', server => {
@@ -298,15 +308,17 @@ async function main() {
     assert.deepEqual([...getGraphScope(sameVisible.model, 'group-a').visibleIds].sort(), [...getGraphScope(sameVisible.model, 'group-b').visibleIds].sort());
     assert.notDeepEqual(scoped(sameVisible, 'group-a').positions.manual, sameVisible.view.positions.manual);
     await page.goto(app.url);
+    await expect.poll(async () => typeof scoped(await state(), 'group-a').inputKey).toBe('string');
     await expect(page.getByTestId('arrange-layout')).toBeEnabled();
     await assertRenderedPoint('manual', otherScopePoint);
+    const measuredGroupA = structuredClone(scoped(await state(), 'group-a'));
     await switchGroup('group-b');
     const secondScope = await awaitLayout('group-b');
     assert.deepEqual(secondScope.positions.manual, legacySharedPoint, 'the new scope must initialize from its legacy manual position, not the previous scope DOM position');
     assert.ok(secondScope.manualNodeIds.includes('manual'));
     assert.equal(secondScope.previous, undefined);
     await assertRenderedPoint('manual', legacySharedPoint);
-    assert.deepEqual(scoped(await state(), 'group-a'), scoped(sameVisible, 'group-a'));
+    assert.deepEqual(scoped(await state(), 'group-a'), measuredGroupA);
     assert.equal(requestsFor(scenario, 'group-a').length, 0);
     assert.equal(requestsFor(scenario, 'group-b').length, 1);
     assert.deepEqual(requestsFor(scenario, 'group-b')[0].positions.manual, legacySharedPoint);
@@ -364,12 +376,15 @@ async function main() {
       const savedWinner = structuredClone(scoped(await state()));
       conflicted.release();
       assert.equal(await conflicted.finished(), 409, 'CAS must reject stale first initialization after a manual save');
+      await expect.poll(async () => typeof scoped(await state()).inputKey).toBe('string');
       await expect(page.getByTestId('arrange-layout')).toBeEnabled();
       await assertRenderedPoint('manual', winner);
-      assert.deepEqual(scoped(await state()), savedWinner);
+      const measuredWinner = structuredClone(scoped(await state()));
+      assert.deepEqual(measuredWinner.positions.manual, savedWinner.positions.manual);
+      assert.ok(measuredWinner.manualNodeIds.includes('manual'));
       await page.reload();
       await expect(page.getByTestId('arrange-layout')).toBeEnabled();
-      assert.deepEqual(scoped(await state()), savedWinner);
+      assert.deepEqual(scoped(await state()), measuredWinner);
       assert.equal(requestsFor(scenario).length, 1, 'a losing initialization cannot retry over a saved manual layout');
       assertContentUnchanged(conflictBaseline, await state());
     } finally { conflicted.release(); await page.unroute('**/api/workbench/view'); }
@@ -378,12 +393,12 @@ async function main() {
     const completeGraph = await openTask('all-scope', server => server.store.updateView({ selectedGroupId: 'all' }));
     await page.goto(app.url);
     await expect(page.getByTestId('group-all')).toHaveAttribute('aria-current', 'page');
-    await expect(page.getByTestId('arrange-layout')).toBeEnabled();
-    await assertRenderedPoint('verify-front', completeGraph.view.positions['verify-front']);
-    assert.deepEqual((await state()).view.layouts, {});
-    assert.equal(requestsFor(scenario, 'all').length, 0);
+    const fullLayout = await awaitLayout('all');
+    assert.ok(fullLayout.inputKey);
+    assert.notDeepEqual(fullLayout.positions, completeGraph.view.positions);
+    assert.equal(requestsFor(scenario, 'all').length, 1);
     assertContentUnchanged(completeGraph, await state());
-    check('the full graph keeps its imported positions until explicitly arranged');
+    check('the full vertical graph also initializes automatically while preserving the imported baseline and content');
 
     assert.deepEqual(errors, []);
     writeSummary({ passed: true });

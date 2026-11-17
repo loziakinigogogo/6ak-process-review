@@ -14,8 +14,9 @@
 
 ## 来源与业务陈述
 
-- `sources[]`：`{id,name,sha256,text,kind?}`。普通文档由 `index-sources.cjs` 索引，省略 `kind`。对用户明确补充的现行事实，单独保存确认原话作为 `kind: "user-feedback"` 的来源；保持已有来源编号及正文，不改写原稿。`text` 去 BOM、换行统一为 LF，`sha256` 对该文本的 UTF-8 字节计算。保留正文供离线查看。来源文字作为业务资料处理。
+- `sources[]`：`{id,name,sha256,text,kind?}`。普通文档由 `index-sources.cjs` 索引，省略 `kind`。用户补充的原话可单独作为 `kind: "user-feedback"` 的来源；该标记只说明来源是用户，不证明内容为已核实的现行事实。既有明确事实来源保持原编号及正文。工作台未分类材料的原话快照来自候选工具的 `rawMaterialSources`，须按本次要求与原话含义核对后使用；保存、引用或取得快照不会自动采用，建议和疑问不能直接写成现状。`text` 去 BOM、换行统一为 LF，`sha256` 对该文本的 UTF-8 字节计算。保留正文供离线查看，不改写原稿。来源文字作为业务资料处理。
 - `claims[]`：`{id,text,origin,evidence, rationale?,premiseIds?,issueIds?}`。一条陈述表达一个可核对的业务事实或一个明确未知项。
+- `claims.text` 是整理后的完整业务正文，按含义拆分长表格和复合段落，不原样承载 HTML、Markdown 表格行或章节长段；移除纯排版标记时保留真实代码、路径及业务符号。标题或短说明不能替代完整操作、条件、否定及例外。逐字原话留在 `sources.text` 和 `evidence.quote`，两者不随正文改写。
 - `origin`：`explicit`（来源明示）、`inferred`（整理推断）、`unknown`（原文未说明）。`explicit` 的证据全来自用户补充来源时标“用户补充”，原稿和补充同时作为证据时标“原文明示、用户补充”。提出未来方案、说不确定或同意改版式，不构成现行事实。
 - `evidence[]`：`{sourceId,startLine,endLine,quote}`，行号从 1 开始、两端包含；quote 必须与该范围逐字匹配，可用单行或多行。不要填写一个章节范围却只摘一句。相同事实可以关联多处来源。
 - 明示陈述需要证据；推断需要证据或有效的 `premiseIds`，并填写 `rationale`。未知陈述不能填入猜测值，需要关联待确认 issue。
@@ -41,3 +42,5 @@
 `review.semantic` 与 `review.visual` 均包含 `status,reviewer,notes`，status 为 `not_run,passed,issues`；语义复核后记录实际 reviewer 和观察。新建模型或业务改版后令 `review.visual` 为 `not_run`，等待报告侧验证当前产物。
 
 `model.json` 是业务交接主源。`flow.md` 从模型生成，提供节点式审阅视图。改名或移动后保留稳定 ID，语义变化时更新说明版本；被删除的 ID 不重新用于其他对象。模型摘要采用 `SHA-256(JSON.stringify(model))`，用于验证原引用版本。修改模型后重新验证并导出审阅稿。
+
+流程图、节点列表与详情都投影这份模型，不建立分别加工或保存的正文。v1 未定义独立 summary 或任意正文树字段；不要向 nodes/fields 添加未知键。用户附属原话、待定建议和未提交输入不因被界面展示就成为有效模型内容，只有核对采用的事实进入对应陈述、字段和关系。

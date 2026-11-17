@@ -43,7 +43,8 @@ test('node selection keeps exact committed text, source evidence, and a portable
   const marker = 'process-review-workbench-ref:v1 ';
   const header = JSON.parse(saved.handoff.slice(saved.handoff.indexOf(marker) + marker.length));
   assert.deepEqual(header, { taskDirectory: task, taskId: state.taskId, referenceId: saved.id,
-    workRevision: state.workRevision, modelHash: state.modelHash, targets: saved.targets });
+    workRevision: state.workRevision, modelHash: state.modelHash, targets: saved.targets, contentHash: saved.contentHash, materialsHash: saved.materialsHash, contentEntryIds: [] });
+  assert.match(saved.contentHash, /^[a-f0-9]{64}$/);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(task, 'workbench', 'references', `${saved.id}.json`), 'utf8')), saved);
 });
 
@@ -102,7 +103,9 @@ test('references retain their original snapshot across edits, reopening, and mut
   assert.equal(read.stale, true);
   assert.equal(read.currentWorkRevision, changed.workRevision);
   assert.equal(read.currentModelHash, changed.modelHash);
-  const { currentWorkRevision, currentModelHash, stale, ...snapshot } = read;
+  const { currentWorkRevision, currentModelHash, currentContentHash, currentMaterialsHash, stale, ...snapshot } = read;
+  assert.equal(currentContentHash, original.contentHash);
+  assert.equal(currentMaterialsHash, original.materialsHash);
   assert.deepEqual(snapshot, original);
   assert.notEqual(read.context.node.title, changed.model.nodes.find(item => item.id === 'validate').title);
   assert.equal(read.context.workRevision, original.workRevision);

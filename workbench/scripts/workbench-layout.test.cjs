@@ -20,17 +20,22 @@ function assertSafeRoutes(input, result) {
   for (const [id, route] of Object.entries(result.routes)) {
     const relation = input.edges.find(e => e.id === id);
     const from = nodes.find(n => n.id === relation.from), to = nodes.find(n => n.id === relation.to);
-    const endpoint = (n, source) => relation.type === 'return' ? { x: n.x, y: n.y + n.height / 2 }
-      : { x: n.x + n.width / 2, y: n.y + (source ? n.height : 0) };
-    assert.deepEqual(route.points[0], endpoint(from, true));
-    assert.deepEqual(route.points.at(-1), endpoint(to, false));
+    for (const [point, n, source] of [[route.points[0], from, true], [route.points.at(-1), to, false]]) {
+      if (relation.type === 'return') {
+        assert.ok(Math.abs(point.x - n.x) < .001 && point.y > n.y && point.y < n.y + n.height, `${id} must attach to the left side`);
+      } else {
+        const side = n.y + (source ? n.height : 0);
+        assert.ok(Math.abs(point.y - side) < .001 && point.x > n.x && point.x < n.x + n.width, `${id} must attach to the ${source ? 'bottom' : 'top'} side`);
+      }
+    }
     assert.equal(route.geometryKey, result.geometryKey);
     for (let i = 1; i < route.points.length; i++) {
       const a = route.points[i - 1], b = route.points[i];
-      assert.ok(a.x === b.x || a.y === b.y, `route ${id} is not orthogonal`);
+      const vertical = Math.abs(a.x - b.x) < .001;
+      assert.ok(vertical || Math.abs(a.y - b.y) < .001, `route ${id} is not orthogonal`);
       for (const n of nodes) {
         // Test the open rectangle so a section touching its own port is valid.
-        const hits = a.x === b.x
+        const hits = vertical
           ? a.x > n.x + 0.001 && a.x < n.x + n.width - 0.001 && Math.max(a.y, b.y) > n.y + 0.001 && Math.min(a.y, b.y) < n.y + n.height - 0.001
           : a.y > n.y + 0.001 && a.y < n.y + n.height - 0.001 && Math.max(a.x, b.x) > n.x + 0.001 && Math.min(a.x, b.x) < n.x + n.width - 0.001;
         assert.equal(hits, false, `route ${id} intersects node ${n.id}`);
@@ -67,6 +72,8 @@ test('branches, merge, cross-group links, and return cycles consume actual ELK s
   const result = await arrangeGraph(input);
   assert.equal(Object.keys(result.routes).length, input.edges.length);
   assert.ok(result.routes['d-a'].points.length >= 4);
+  assert.ok(Math.abs(result.routes['a-b'].points[0].x - result.routes['a-c'].points[0].x) >= 8, 'branches leave the source independently');
+  assert.ok(Math.abs(result.routes['b-d'].points.at(-1).x - result.routes['c-d'].points.at(-1).x) >= 8, 'branches enter the shared target independently');
   for (const relation of input.edges.filter(e => e.label)) {
     assert.equal(result.routes[relation.id].label.width, relation.labelWidth);
     assert.equal(result.routes[relation.id].label.height, relation.labelHeight);

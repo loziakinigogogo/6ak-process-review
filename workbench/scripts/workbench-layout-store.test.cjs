@@ -23,7 +23,7 @@ function layout(store, scopeId, action, extra = {}) {
   const state = store.read();
   return store.updateView({ requestId: randomUUID(), layout: {
     scopeId, action, baseRevision: state.view.layouts[scopeId]?.revision || 0,
-    ...(['arrange', 'initialize'].includes(action) ? { baseModelHash: state.modelHash } : {}), ...extra,
+    ...(['arrange', 'initialize', 'reset', 'refresh', 'measure'].includes(action) ? { baseModelHash: state.modelHash } : {}), ...extra,
   } });
 }
 function arrange(store, scopeId, positions, routes = {}) { return layout(store, scopeId, 'arrange', { positions, routes }); }
@@ -128,6 +128,50 @@ test('manual positions are protected until released and routes are cleared after
   assert.deepEqual(store.read().view.layouts.execute.manualNodeIds, []);
   arrange(store, 'execute', { validate: { x: 220, y: 400 } });
   assert.deepEqual(store.read().view.layouts.execute.positions.validate, { x: 220, y: 400 });
+});
+
+test('reset replaces the current layout and its manual pins with undo while rejecting stale and partial requests', async t => {
+  const { store, task } = setup(t);
+  const { getGraphScope } = await import('../frontend/src/graph-scope.mjs');
+  store.updateView({ positions: { calculate: { x: 600, y: 800 } } });
+  move(store, 'prepare', { calculate: { x: 700, y: 900 } });
+  const before = move(store, 'execute', { validate: { x: 300, y: 400 } });
+  const visible = getGraphScope(before.model, 'execute').visibleIds;
+  const positions = Object.fromEntries([...visible].map((id, index) => [id, { x: 100, y: 40 + index * 200 }]));
+  const input = { requestId: randomUUID(), layout: {
+    scopeId: 'execute', action: 'reset', baseRevision: before.view.layouts.execute.revision, baseModelHash: before.modelHash,
+    positions, routes: { 'validate--dispatch': route },
+  } };
+  const partial = { ...positions };
+  delete partial.validate;
+  assert.deepEqual(new Set(before.view.layouts.execute.manualNodeIds), new Set(['calculate', 'validate']));
+  assert.throws(() => layout(store, 'execute', 'reset', { positions: partial }));
+  assert.throws(() => layout(store, 'execute', 'reset', { positions, baseRevision: input.layout.baseRevision - 1 }), conflict);
+  assert.throws(() => layout(store, 'execute', 'reset', { positions, baseModelHash: undefined }), conflict);
+  assert.deepEqual(store.read(), before);
+
+  const saved = store.updateView(input);
+  assert.deepEqual(saved.view.layouts.execute.positions, positions);
+  assert.deepEqual(saved.view.layouts.execute.manualNodeIds, []);
+  assert.deepEqual(saved.view.layouts.execute.routes, input.layout.routes);
+  assert.deepEqual(saved.view.layouts.prepare, before.view.layouts.prepare);
+  assert.deepEqual(saved.view.positions, before.view.positions);
+  assert.deepEqual(saved.view.manualNodeIds, before.view.manualNodeIds);
+  assert.deepEqual(business(saved), business(before));
+
+  const reopened = createStore(task);
+  assert.deepEqual(reopened.read(), saved);
+  assert.deepEqual(reopened.updateView(input), saved);
+  const restored = layout(reopened, 'execute', 'undo');
+  assert.deepEqual(restored.view.layouts.execute.positions, before.view.layouts.execute.positions);
+  assert.deepEqual(restored.view.layouts.execute.manualNodeIds, before.view.layouts.execute.manualNodeIds);
+  assert.deepEqual(restored.view.layouts.prepare, before.view.layouts.prepare);
+  assert.deepEqual(business(restored), business(before));
+
+  const edited = reopened.edit({ requestId: randomUUID(), baseWorkRevision: restored.workRevision, baseModelHash: restored.modelHash,
+    nodeId: 'validate', title: '重置计算期间修改的节点名称' });
+  assert.throws(() => layout(reopened, 'execute', 'reset', { positions, baseModelHash: before.modelHash }), conflict);
+  assert.deepEqual(reopened.read(), edited);
 });
 
 test('one-step arrange undo preserves later manual moves, including a move whose pin was released', t => {
@@ -287,4 +331,73 @@ test('an interrupted prepared layout transaction is recovered without changing t
   const restored = createStore(task).read();
   assert.deepEqual(restored, saved);
   assert.deepEqual(business(restored), business(before));
+});
+
+test('automatic refresh upgrades a saved layout while retaining pins, explicit undo and other scopes', async t => {
+  const { store, task } = setup(t);
+  const { getGraphScope } = await import('../frontend/src/graph-scope.mjs');
+  arrange(store, 'prepare', { calculate: { x: 500, y: 500 } });
+  arrange(store, 'execute', { validate: { x: 100, y: 200 } });
+  move(store, 'execute', { validate: { x: 145, y: 235 } });
+  const before = store.read(), saved = before.view.layouts.execute;
+  const inputKey = 'elk-input:v3:DOWN:1234567890abcdef:120';
+  const positions = Object.fromEntries([...getGraphScope(before.model, 'execute').visibleIds].map((id, index) => [id,
+    saved.manualNodeIds.includes(id) ? saved.positions[id] : { x: 400, y: index * 220 },
+  ]));
+  const input = { requestId: randomUUID(), layout: { scopeId: 'execute', action: 'refresh', baseRevision: saved.revision, baseModelHash: before.modelHash, inputKey, positions, routes: {} } };
+  const after = store.updateView(input);
+  assert.equal(after.view.layouts.execute.inputKey, inputKey);
+  assert.deepEqual(after.view.layouts.execute.manualNodeIds, saved.manualNodeIds);
+  assert.deepEqual(after.view.layouts.execute.positions.validate, saved.positions.validate);
+  assert.deepEqual(after.view.layouts.execute.previous, saved.previous, 'automatic maintenance must not consume explicit undo');
+  assert.deepEqual(after.view.layouts.prepare, before.view.layouts.prepare);
+  assert.deepEqual(business(after), business(before));
+  assert.deepEqual(createStore(task).read(), after);
+  assert.deepEqual(store.updateView(input), after, 'replayed request remains idempotent');
+  assert.throws(() => store.updateView({ ...input, requestId: randomUUID() }), conflict);
+
+  const partial = { ...positions }; delete partial.manual;
+  assert.throws(() => layout(store, 'execute', 'refresh', { inputKey, positions: partial }));
+  assert.throws(() => layout(store, 'execute', 'refresh', { inputKey, positions: { ...positions, validate: { x: 0, y: 0 } } }), conflict);
+  assert.throws(() => layout(store, 'execute', 'refresh', { positions }));
+  assert.throws(() => layout(store, 'execute', 'refresh', { inputKey: 'not-a-layout-signature', positions }));
+  assert.deepEqual(store.read(), after);
+});
+
+test('undo adopts its final card measurement without moving positions or reintroducing a prior arrangement', async t => {
+  const { store } = setup(t);
+  const { getGraphScope } = await import('../frontend/src/graph-scope.mjs');
+  const initial = store.read();
+  const positions = Object.fromEntries([...getGraphScope(initial.model, 'execute').visibleIds].map((id, index) => [id, { x: 100, y: index * 220 }]));
+  const firstKey = 'elk-input:v3:DOWN:1234567890abcdef:120';
+  layout(store, 'execute', 'initialize', { positions, inputKey: firstKey });
+  move(store, 'execute', { validate: { x: 900, y: 200 } });
+  layout(store, 'execute', 'reset', { positions, inputKey: firstKey });
+  const undone = layout(store, 'execute', 'undo');
+  assert.equal(undone.view.layouts.execute.needsMeasurement, undone.modelHash);
+  assert.deepEqual(undone.view.layouts.execute.positions.validate, { x: 900, y: 200 });
+  const finalKey = 'elk-input:v3:DOWN:abcdef1234567890:120';
+  const measured = layout(store, 'execute', 'measure', { inputKey: finalKey });
+  assert.deepEqual(measured.view.layouts.execute.positions, undone.view.layouts.execute.positions);
+  assert.deepEqual(measured.view.layouts.execute.manualNodeIds, undone.view.layouts.execute.manualNodeIds);
+  assert.equal(measured.view.layouts.execute.previous, undefined);
+  assert.equal(measured.view.layouts.execute.needsMeasurement, undefined);
+  assert.equal(measured.view.layouts.execute.inputKey, finalKey);
+  assert.deepEqual(business(measured), business(undone));
+  assert.throws(() => layout(store, 'execute', 'measure', { inputKey: finalKey }), conflict, 'measurement-only cannot silently accept arbitrary new content');
+  assert.deepEqual(store.read(), measured);
+});
+
+test('undo measurement cannot absorb later model changes or incomplete restored node coordinates', async t => {
+  const { store } = setup(t, {});
+  const key = 'elk-input:v3:DOWN:1234567890abcdef:120';
+  layout(store, 'execute', 'initialize', { positions: { validate: { x: 100, y: 100 } }, inputKey: key });
+  arrange(store, 'execute', { validate: { x: 200, y: 200 } });
+  const undone = layout(store, 'execute', 'undo');
+  assert.throws(() => layout(store, 'execute', 'measure', { inputKey: key }), conflict, 'missing node positions require refresh instead of adopting the signature');
+  assert.deepEqual(store.read(), undone);
+  const edited = store.edit({ requestId: randomUUID(), nodeId: 'validate', title: '撤销之后内容再次改变', baseWorkRevision: undone.workRevision, baseModelHash: undone.modelHash });
+  assert.throws(() => layout(store, 'execute', 'measure', { inputKey: key }), conflict);
+  assert.deepEqual(store.read(), edited);
+  assert.throws(() => layout(store, 'execute', 'measure', { inputKey: key, baseModelHash: undone.modelHash }), conflict);
 });
