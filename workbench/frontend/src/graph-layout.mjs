@@ -1,8 +1,11 @@
+import { alignRouteToHandles } from './graph-smart-route.mjs';
+
 /** Layout changes presentation only. Business nodes and relations are never mutated. */
 const NODE_GAP = 40;
 const ROUTE_CLEARANCE = 8;
 const EPSILON = 0.001;
 const compareIds = (a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+const compareOrder = (a, b) => (a ?? Infinity) - (b ?? Infinity);
 const samePoint = (a, b) => Math.abs(a.x - b.x) < EPSILON && Math.abs(a.y - b.y) < EPSILON;
 const finitePoint = point => point && Number.isFinite(point.x) && Number.isFinite(point.y);
 const transposePoint = ({ x, y }) => ({ x: y, y: x });
@@ -12,14 +15,19 @@ function validateDirection(direction) {
   if (direction !== 'DOWN' && direction !== 'RIGHT') throw new Error(`Unsupported layout direction: ${direction}`);
 }
 
-export function relationPorts(edges) {
-  const byNode = new Map(), byEdge = new Map();
+export function relationPorts(edges, nodes = [], direction = 'DOWN') {
+  const byNode = new Map(), byEdge = new Map(), neighbourOrders = new Map();
+  const boxes = new Map(nodes.map(n => [n.id, n]));
   for (const edge of [...edges].sort(compareIds)) {
     const endpoints = {};
     for (const [type, nodeId] of [['source', edge.from], ['target', edge.to]]) {
       const side = edge.type === 'return' ? 'left' : type === 'source' ? 'bottom' : 'top';
       if (!byNode.has(nodeId)) byNode.set(nodeId, []);
       const port = { id: `${type}-${edge.id}`, type, side, fraction: .5 };
+      const neighbour = boxes.get(type === 'source' ? edge.to : edge.from);
+      const vertical = (direction === 'RIGHT') !== (side === 'left');
+      const across = neighbour && (vertical ? neighbour.y + neighbour.height / 2 : neighbour.x + neighbour.width / 2);
+      neighbourOrders.set(port.id, { across, node: type === 'source' ? edge.toOrder : edge.fromOrder, exit: edge.exitOrder });
       byNode.get(nodeId).push(port);
       endpoints[type] = port;
     }
@@ -30,6 +38,11 @@ export function relationPorts(edges) {
     for (const side of ['top', 'bottom', 'left']) {
       const group = ports.filter(port => port.side === side);
       if (group.length < 2) continue;
+      group.sort((a, b) => {
+        const first = neighbourOrders.get(a.id), second = neighbourOrders.get(b.id);
+        return compareOrder(first.across, second.across)
+          || (side !== 'left' && (compareOrder(first.node, second.node) || compareOrder(first.exit, second.exit))) || compareIds(a, b);
+      });
       spread = true;
       const step = Math.min(.16, .7 / (group.length - 1));
       group.forEach((port, index) => { port.fraction = .5 + (index - (group.length - 1) / 2) * step; });
@@ -42,8 +55,8 @@ export function relationPorts(edges) {
 export function routeGeometryKey(nodes, edges, direction = 'DOWN', ports = relationPorts(edges)) {
   validateDirection(direction);
   const value = JSON.stringify([
-    [...nodes].sort(compareIds).map(n => [n.id, n.x, n.y, n.width, n.height]),
-    [...edges].sort(compareIds).map(e => [e.id, e.from, e.to, e.type || 'sequence', e.label || '', e.labelWidth || 0, e.labelHeight || 0]),
+    [...nodes].sort(compareIds).map(n => [n.id, n.x, n.y, n.width, n.height, ...(n.order === undefined ? [] : [n.order])]),
+    [...edges].sort(compareIds).map(e => [e.id, e.from, e.to, e.type || 'sequence', e.label || '', e.labelWidth || 0, e.labelHeight || 0, ...(e.toOrder === undefined ? [] : [e.fromOrder, e.toOrder, e.exitOrder]), ...(e.layoutRole ? [e.layoutRole] : [])]),
   ]);
   let first = 0x811c9dc5, second = 0x9e3779b9;
   for (let i = 0; i < value.length; i++) {
@@ -53,7 +66,7 @@ export function routeGeometryKey(nodes, edges, direction = 'DOWN', ports = relat
     second ^= second >>> 13;
   }
   // The key for centered ports can still match older saved routes.
-  const prefix = ports.spread ? `elk-route:v3:${direction}` : direction === 'RIGHT' ? 'elk-route:v2:RIGHT' : 'elk-route:v1';
+  const prefix = ports.spread ? `elk-route:v4:${direction}` : direction === 'RIGHT' ? 'elk-route:v2:RIGHT' : 'elk-route:v1';
   return `${prefix}:${(first >>> 0).toString(16).padStart(8, '0')}${(second >>> 0).toString(16).padStart(8, '0')}:${value.length}`;
 }
 
@@ -184,9 +197,9 @@ function safeRoute(points, edge, nodes, label, acceptedLabels) {
  * Sections and labels are reused only after validation against the FINAL graph.
  * Omitted routes must be computed by the caller's obstacle router (SmartEdge).
  */
-export async function arrangeGraph({ nodes, edges, manualNodeIds = [], direction = 'DOWN' }) {
+export async function arrangeGraph({ nodes, edges, manualNodeIds = [], direction = 'DOWN', maxLeafDepth = 2 }) {
   validateDirection(direction);
-  if (direction === 'DOWN') return arrangeDownGraph({ nodes, edges, manualNodeIds });
+  if (direction === 'DOWN') return arrangeDownGraph({ nodes, edges, manualNodeIds, maxLeafDepth });
 
   // Layout in a transposed coordinate system, then restore the real card and
   // label geometry. Text is never rotated. This also makes pinned-node packing
@@ -194,7 +207,7 @@ export async function arrangeGraph({ nodes, edges, manualNodeIds = [], direction
   const result = await arrangeDownGraph({
     nodes: nodes.map(node => ({ ...node, ...transposeBox(node) })),
     edges: edges.map(edge => ({ ...edge, labelWidth: edge.labelHeight, labelHeight: edge.labelWidth })),
-    manualNodeIds,
+    manualNodeIds, maxLeafDepth,
   });
   const positions = Object.fromEntries(Object.entries(result.positions).map(([id, point]) => [id, transposePoint(point)]));
   const geometryKey = routeGeometryKey(nodes.map(node => ({ ...node, ...positions[node.id] })), edges, direction);
@@ -206,10 +219,38 @@ export async function arrangeGraph({ nodes, edges, manualNodeIds = [], direction
   return { ...result, positions, routes, geometryKey };
 }
 
-async function arrangeDownGraph({ nodes, edges, manualNodeIds }) {
+// Reserve a single footprint in the layer while keeping every real card and edge.
+export function dataLeafGrids(edges, maxDepth, pinned = []) {
+  const sets = new Map();
+  const fixed = new Set(pinned);
+  for (const edge of edges) {
+    if (edge.dataLeafGroup === undefined || fixed.has(edge.to)) continue;
+    const key = JSON.stringify([edge.from, edge.dataLeafGroup]);
+    if (!sets.has(key)) sets.set(key, []);
+    sets.get(key).push(edge);
+  }
+  return [...sets.values()].filter(set => set.length >= 4 && maxDepth >= 2).map(set => ({
+    ids: set.sort((a, b) => compareOrder(a.toOrder, b.toOrder) || compareIds(a, b)).map(edge => edge.to),
+    depth: Math.min(maxDepth, Math.round(Math.sqrt(set.length))),
+  }));
+}
+
+async function arrangeDownGraph({ nodes, edges, manualNodeIds, maxLeafDepth }) {
   validateInput(nodes, edges);
-  const orderedNodes = [...nodes].sort(compareIds), orderedEdges = [...edges].sort(compareIds);
+  const orderedNodes = [...nodes].sort((a, b) => compareOrder(a.order, b.order) || compareIds(a, b));
+  const orderedEdges = [...edges].sort((a, b) => compareOrder(a.fromOrder, b.fromOrder) || compareOrder(a.toOrder, b.toOrder) || compareOrder(a.exitOrder, b.exitOrder) || compareIds(a, b));
   const manualIds = new Set(manualNodeIds);
+  const nodesById = new Map(orderedNodes.map(node => [node.id, node]));
+  const footprints = new Map(), cells = new Map();
+  for (const { ids, depth } of dataLeafGrids(orderedEdges, maxLeafDepth, manualNodeIds)) {
+    const members = ids.map(id => nodesById.get(id));
+    const across = Math.ceil(ids.length / depth);
+    const cellWidth = Math.max(...members.map(node => node.width)) + 64;
+    const cellHeight = Math.max(...members.map(node => node.height)) + 80;
+    footprints.set(ids[0], { width: across * cellWidth - 64, height: depth * cellHeight - 80 });
+    ids.forEach((id, i) => cells.set(id, { anchor: ids[0], x: (i % across) * cellWidth, y: Math.floor(i / across) * cellHeight }));
+  }
+  const represented = id => !cells.has(id) || cells.get(id).anchor === id;
   const internalIds = new Map(orderedNodes.map((n, i) => [n.id, `n${i}`]));
   const ports = relationPorts(orderedEdges);
   const internalPortId = (nodeId, port) => `${internalIds.get(nodeId)}:${port.id}`;
@@ -224,26 +265,31 @@ async function arrangeDownGraph({ nodes, edges, manualNodeIds }) {
       'elk.layered.spacing.edgeEdgeBetweenLayers': '20', 'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
       'elk.layered.nodePlacement.favorStraightEdges': 'true', 'elk.separateConnectedComponents': 'true',
     },
-    children: orderedNodes.map(node => {
+    children: orderedNodes.filter(node => represented(node.id)).map(node => {
       const id = internalIds.get(node.id);
       return {
-        id, width: node.width, height: node.height, layoutOptions: { 'elk.portConstraints': 'FIXED_POS' },
+        id, width: node.width, height: node.height, ...footprints.get(node.id), layoutOptions: { 'elk.portConstraints': 'FIXED_POS' },
         ports: (ports.byNode.get(node.id) || []).map(port => ({
           id: internalPortId(node.id, port), ...portPoint({ ...node, x: 0, y: 0 }, port), width: 0, height: 0,
           layoutOptions: { 'elk.port.side': portSides[port.side] },
         })),
       };
     }),
-    edges: orderedEdges.map((edge, index) => ({
-      id: `e${index}`, sources: [internalPortId(edge.from, ports.byEdge.get(edge.id).source)],
-      targets: [internalPortId(edge.to, ports.byEdge.get(edge.id).target)],
-      // Cycle breaking should reverse a return/secondary link in the layout,
-      // preserving downward process flow. Original relation endpoints stay intact.
-      layoutOptions: { 'elk.layered.priority.direction': edge.type === 'return' ? '0'
-        : ['sequence', 'conditional', 'parallel'].includes(edge.type || 'sequence') ? '100' : '1' },
-      ...(edge.label ? { labels: [{ text: edge.label, width: edge.labelWidth, height: edge.labelHeight,
-        layoutOptions: { 'elk.edgeLabels.placement': 'CENTER' } }] } : {}),
-    })),
+    edges: orderedEdges.flatMap((edge, index) => {
+      if (!represented(edge.to) || edge.layoutRole === 'context') return [];
+      const from = internalPortId(edge.from, ports.byEdge.get(edge.id).source);
+      const to = internalPortId(edge.to, ports.byEdge.get(edge.id).target);
+      const feedback = edge.layoutRole === 'feedback';
+      return [{
+        // Layer an outside approval downstream of the step to which it returns.
+        // sectionPoints walks the saved section from the real business source.
+        id: `e${index}`, sources: [feedback ? to : from], targets: [feedback ? from : to],
+        layoutOptions: { 'elk.layered.priority.direction': edge.type === 'return' ? '0'
+          : ['sequence', 'conditional', 'parallel'].includes(edge.type || 'sequence') ? '100' : '1' },
+        ...(edge.label ? { labels: [{ text: edge.label, width: edge.labelWidth, height: edge.labelHeight,
+          layoutOptions: { 'elk.edgeLabels.placement': 'CENTER' } }] } : {}),
+      }];
+    }),
   };
   const { result, workerUsed } = nodes.length ? await runElk(graph) : { result: { children: [], edges: [] }, workerUsed: false };
   const elkNodes = new Map(result.children.map(n => [n.id, n]));
@@ -253,20 +299,27 @@ async function arrangeDownGraph({ nodes, edges, manualNodeIds }) {
     y: median(pinned.map(n => n.y - elkNodes.get(internalIds.get(n.id)).y)),
   };
   const desired = Object.fromEntries(orderedNodes.map(n => {
-    const position = elkNodes.get(internalIds.get(n.id));
+    const cell = cells.get(n.id);
+    const position = elkNodes.get(internalIds.get(cell?.anchor ?? n.id));
     if (!finitePoint(position)) throw new Error(`ELK did not position node ${n.id}.`);
-    return [n.id, { x: position.x + shift.x, y: position.y + shift.y }];
+    return [n.id, { x: position.x + shift.x + (cell?.x || 0), y: position.y + shift.y + (cell?.y || 0) }];
   }));
   const positions = avoidFixedNodes(orderedNodes, desired, manualIds);
   const finalNodes = orderedNodes.map(n => ({ ...n, ...positions[n.id] }));
   const byId = new Map(finalNodes.map(n => [n.id, n]));
-  const geometryKey = routeGeometryKey(finalNodes, orderedEdges, 'DOWN', ports);
+  const finalPorts = relationPorts(orderedEdges, finalNodes);
+  const geometryKey = routeGeometryKey(finalNodes, orderedEdges, 'DOWN', finalPorts);
   const elkEdges = new Map((result.edges || []).map(e => [e.id, e]));
   const routes = {}, acceptedLabels = [], discardedRouteIds = [];
   for (const [index, edge] of orderedEdges.entries()) {
     const elkEdge = elkEdges.get(`e${index}`);
-    const { source, target } = ports.byEdge.get(edge.id);
-    const points = sectionPoints(elkEdge?.sections, portPoint(byId.get(edge.from), source), portPoint(byId.get(edge.to), target), shift);
+    const { source, target } = finalPorts.byEdge.get(edge.id);
+    const start = portPoint(byId.get(edge.from), source), end = portPoint(byId.get(edge.to), target);
+    const oldPorts = ports.byEdge.get(edge.id);
+    const original = sectionPoints(elkEdge?.sections, portPoint(byId.get(edge.from), oldPorts.source), portPoint(byId.get(edge.to), oldPorts.target), shift);
+    const points = original && (samePoint(original[0], start) && samePoint(original.at(-1), end) ? original
+      : alignRouteToHandles(original, { sourceX: start.x, sourceY: start.y, targetX: end.x, targetY: end.y,
+        sourcePosition: source.side, targetPosition: target.side }, finalNodes));
     const rawLabel = elkEdge?.labels?.[0];
     // ELK's label x/y are the top-left corner, not the ReactFlow label center.
     const label = rawLabel && { x: rawLabel.x + shift.x, y: rawLabel.y + shift.y, width: rawLabel.width, height: rawLabel.height };

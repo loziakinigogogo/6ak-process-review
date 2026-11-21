@@ -96,6 +96,9 @@ function validateModel(model) {
   for (const [id, group] of tables.groups) {
     const at = `groups.${id}`; keys(group, ['id', 'title', 'kind', 'claimIds'], at); str(group.title, `${at}.title`);
     enumValue(group.kind, ['source', 'editorial'], `${at}.kind`); claims(group.claimIds, `${at}.claimIds`, group.kind === 'source' ? 1 : 0);
+    if (group.kind === 'editorial' && /^(?:阶段\s*\d+|第\s*\d+\s*组|\d+)\s*[|｜]\s*\S/u.test(group.title)) {
+      warnings.push(`${at}.title: 请核对标题前缀是否为阅读序号。工作台按组序显示编号，正式业务名称可保留。`);
+    }
   }
   function fields(obj, names, supported, at) {
     if (!keys(obj, names, at)) return;
@@ -106,13 +109,23 @@ function validateModel(model) {
     if (!tables.groups.has(node.groupId)) fail(`${at}.groupId`, '分组不存在');
     const supported = claims(node.claimIds, `${at}.claimIds`, 1); fields(node.fields, NODE_FIELDS, supported, `${at}.fields`);
   }
+  const conditionalExits = new Map();
   for (const [id, relation] of tables.relations) {
     const at = `relations.${id}`; keys(relation, ['id', 'from', 'to', 'type', 'claimIds', 'conditionClaimIds'], at);
     for (const key of ['from', 'to']) if (!tables.nodes.has(relation[key])) fail(`${at}.${key}`, '节点不存在');
     enumValue(relation.type, ['sequence', 'conditional', 'parallel', 'return', 'data', 'association'], `${at}.type`);
     const supported = claims(relation.claimIds, `${at}.claimIds`, 1);
     for (const c of supported) if (tables.claims.get(c)?.origin === 'unknown') fail(at, '不能用未知项建立业务关系');
-    for (const c of claims(relation.conditionClaimIds, `${at}.conditionClaimIds`, relation.type === 'conditional' ? 1 : 0)) if (!supported.includes(c)) fail(at, `条件 ${c} 未列入关系 claimIds`);
+    const conditions = claims(relation.conditionClaimIds, `${at}.conditionClaimIds`, relation.type === 'conditional' ? 1 : 0);
+    for (const c of conditions) if (!supported.includes(c)) fail(at, `条件 ${c} 未列入关系 claimIds`);
+    if (relation.type === 'conditional' && conditions.length) {
+      const texts = conditions.map(c => tables.claims.get(c)?.text);
+      if (!texts.every(text => typeof text === 'string')) continue;
+      const key = JSON.stringify([relation.from, texts.map(text => text.trim()).sort()]);
+      const other = conditionalExits.get(key);
+      if (!other) conditionalExits.set(key, relation);
+      else if (other.to !== relation.to) warnings.push(`relations.${other.id} / ${id}: 不同去向使用相同条件，请核对各出口的判断或共同触发依据。`);
+    }
   }
   for (const [id, rule] of tables.rules) {
     const at = `rules.${id}`; keys(rule, ['id', 'title', 'claimIds', 'parameters'], at); str(rule.title, `${at}.title`);

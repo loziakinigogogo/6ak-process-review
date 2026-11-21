@@ -1,19 +1,23 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, getViewportForBounds, MarkerType, useKeyPress, useReactFlow, applyNodeChanges, type NodeProps, type Node as FlowNode, type Edge as FlowEdge, type NodeChange, type Viewport } from '@xyflow/react';
+import { ReactFlow, ReactFlowProvider, ViewportPortal, Background, BackgroundVariant, getViewportForBounds, MarkerType, useKeyPress, useReactFlow, applyNodeChanges, type NodeProps, type Node as FlowNode, type Edge as FlowEdge, type NodeChange, type Viewport } from '@xyflow/react';
 import { ArrowDownRight, ArrowRight, Check, ChevronDown, Copy, Download, FileText, GitBranch, History, Info, Layers3, LoaderCircle, Maximize2, Minus, Pencil, Plus, RotateCcw, Save, Search, Waypoints, X, AlertCircle, PanelRightClose, PanelRightOpen, Network, Pin, PinOff, Undo2, ListRestart } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 import './styles.css';
+import { groupsForDisplay } from './group-labels.mjs';
 import { sourceLocationsFor } from './source-locations.mjs';
 import { nodeMaterialsFor, type MaterialContext } from './node-materials.mjs';
 import { getGraphScope } from './graph-scope.mjs';
-import { arrangeGraph, relationPorts, routeGeometryKey, type RelationPort } from './graph-layout.mjs';
-import { layoutInputKey } from './graph-layout-input.mjs';
-import { ProcessEdge, ProcessHandles, measureEdgeLabel, processEdgeColor, useProcessRoutes, type ScopedLayout, type Point } from './graph-routing';
+import { arrangeGraph, dataLeafGrids, relationPorts, routeGeometryKey, type RelationPort } from './graph-layout.mjs';
+import { layoutInputKey, scopeLayoutEdges } from './graph-layout-input.mjs';
+import { DataBusOverlay, planDataBus } from './data-bus';
+import { ProcessEdge, ProcessHandles, processEdgeColor, useProcessRoutes, type ScopedLayout, type Point } from './graph-routing';
 import { PRESETS, STRUCTURE_PRESETS, buildPresetTask, formatPresetHandoff } from '../../shared/workbench-presets.mjs';
 import { AgentTaskPreview, type TaskQuote } from './agent-task-preview';
 import { fieldLabels, relationLabels, legacyStructureHandoff, type LegacyStructureDraft } from './structure-draft';
 import { NodeProse, nodeProseContext } from './node-prose';
+import { ExitComparison, graphExits, GraphGroupBadge } from './exit-comparison';
+import { RelationEvidence } from './relation-evidence';
 import { NodeContent, ContentTreeRead, type ContentTree } from './node-content';
 import './node-content.css';
 
@@ -256,22 +260,59 @@ function CompactTextarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement
   return <textarea {...props} className={['compact-textarea', props.className].filter(Boolean).join(' ')} rows={1} ref={element} />;
 }
 
+function shortEntityLabel(text: string, maxLength = 24): string {
+  const cleaned = text.trim().replace(/[。；.;]+$/, '');
+  if (!cleaned || cleaned.length > maxLength || /[\n\r]/.test(cleaned)) return '';
+  return cleaned;
+}
+
 function ProcessCard({ data, selected }: NodeProps) {
-  const item = data as { title: string; role: string; actions: Claim[]; hasDetails: boolean; onActions: () => void; onDetails: () => void; groupIndex: number; groupTitle: string; displayNo: number; context: boolean; issueCount: number; unknownCount: number; changed: boolean; draft: boolean; outgoing: number };
-  // Until a separately evidenced editorial summary exists, show a complete short
-  // source statement only. Long or multiple operations remain in full in details.
-  const summary = item.actions.length === 1 && item.actions[0].text.length <= 90 ? item.actions[0] : null;
-  return <div className={`process-card ${selected ? 'is-selected' : ''} ${item.context ? 'context-node' : ''} ${item.draft ? 'has-draft' : ''}`} style={groupStyle(item.groupIndex)} data-testid={`graph-node-${String(data.nodeId)}`} data-group-id={String(data.groupId)} data-context={item.context ? 'true' : 'false'} data-manual={data.manual ? 'true' : 'false'}>
+  const item = data as {
+    title: string; role: string; system: string; actions: Claim[]; fallbackPreview: string;
+    showGroupLabel: boolean; compareExits: () => void; groupIndex: number; groupTitle: string;
+    displayNo: number; context: boolean; issueCount: number; unknownCount: number;
+    changed: boolean; draft: boolean; outgoing: number;
+  };
+  const shortRole = shortEntityLabel(item.role, 24);
+  const shortSystem = !shortRole ? shortEntityLabel(item.system, 24) : '';
+  const eyebrowOwner = shortRole || shortSystem;
+  const completeShortAction = item.actions.length === 1 && item.actions[0].text.length <= 90 ? item.actions[0] : null;
+  const previewAction = !completeShortAction && item.actions.length > 0 ? item.actions[0] : null;
+  const hasMeta = item.actions.length > 1 || item.outgoing > 1 || item.issueCount > 0 || (!item.issueCount && item.unknownCount > 0) || item.draft;
+  return <div className={`process-card ${selected ? 'is-selected' : ''} ${item.context ? 'context-node' : ''} ${item.outgoing > 1 ? 'has-branches' : ''} ${item.draft ? 'has-draft' : ''}`} style={groupStyle(item.groupIndex)} data-testid={`graph-node-${String(data.nodeId)}`} data-group-id={String(data.groupId)} data-context={item.context ? 'true' : 'false'} data-manual={data.manual ? 'true' : 'false'}>
     <ProcessHandles nodeId={String(data.nodeId)} direction={data.direction as LayoutDirection} ports={data.ports as RelationPort[] | undefined} />
-    <div className="node-eyebrow"><span className="node-group-badge group-badge" title={item.groupTitle} aria-label={`${item.groupTitle}，组内 ${item.displayNo} 号`}><b>{item.displayNo}</b></span>{item.context && <span className="context-badge">组外</span>}{item.changed && <i className="changed-dot" title="本轮已修改" />}{Boolean(data.manual) && <Pin size={12} className="node-pin" aria-label="已固定位置" />}</div>
+    <div className="node-eyebrow">
+      {item.context ? (
+        <span className="node-group-badge group-badge is-context" title={item.groupTitle}><strong>来自第 {item.groupIndex + 1} 组</strong></span>
+      ) : item.showGroupLabel ? (
+        <span className="node-group-badge group-badge" title={item.groupTitle}>
+          <strong>第 {item.groupIndex + 1} 组</strong>
+          {eyebrowOwner && <span className="node-eyebrow-owner">· {eyebrowOwner}</span>}
+        </span>
+      ) : (
+        <span className="node-group-badge group-badge is-compact" title={`第 ${item.groupIndex + 1} 组 · ${item.groupTitle}`}>
+          <span className="node-eyebrow-owner">{eyebrowOwner || `第 ${item.groupIndex + 1} 组`}</span>
+        </span>
+      )}
+      <span className="node-number" title={`第 ${item.groupIndex + 1} 组 · 组内 ${item.displayNo} 号`}>#{item.displayNo}</span>
+      {item.changed && <i className="changed-dot" title="本轮已修改" />}
+      {Boolean(data.manual) && <Pin size={11} className="node-pin" aria-label="已固定位置" />}
+    </div>
     <div className="node-title">{item.title}</div>
-    {item.role && <div className="node-role" title={item.role}>{item.role}</div>}
-    {summary && <div className="node-actions" aria-label="操作说明"><p data-claim-id={summary.id}>{summary.text}</p></div>}
-    {(item.actions.length > 0 || item.hasDetails) && <div className="node-card-links">
-      {item.actions.length > 0 && !summary && <button type="button" className="node-detail-hint node-actions-link nodrag nopan" onClick={event => { event.stopPropagation(); item.onActions(); }}>{item.actions.length === 1 ? '查看完整操作' : `查看全部 ${item.actions.length} 条操作`} <ArrowRight size={11}/></button>}
-      {item.hasDetails && <button type="button" className="node-detail-hint nodrag nopan" onClick={event=>{event.stopPropagation();item.onDetails();}}>查看节点详情 <ArrowRight size={11}/></button>}
+    {completeShortAction ? (
+      <div className="node-actions" aria-label="操作说明"><p className="is-complete" data-claim-id={completeShortAction.id}>{completeShortAction.text}</p></div>
+    ) : previewAction ? (
+      <div className="node-actions" aria-label="操作概要"><p className="is-preview" data-claim-id={previewAction.id}>{previewAction.text}</p></div>
+    ) : item.fallbackPreview ? (
+      <div className="node-actions" aria-label="节点要点"><p className="is-preview">{item.fallbackPreview}</p></div>
+    ) : null}
+    {hasMeta && <div className="node-meta">
+      {item.actions.length > 1 && <span className="node-action-count">{item.actions.length} 条操作</span>}
+      {item.outgoing > 1 && <button type="button" className="compare-exits nodrag nopan" data-testid={`compare-exits-${data.nodeId}`} onClick={event => { event.stopPropagation(); item.compareExits(); }}><GitBranch size={11}/>对照 {item.outgoing} 出口</button>}
+      {item.issueCount > 0 && <span className="node-issue"><AlertCircle size={11}/> {item.issueCount} 待确认</span>}
+      {!item.issueCount && item.unknownCount > 0 && <span className="node-issue"><AlertCircle size={11}/> {item.unknownCount} 未说明</span>}
+      {item.draft && <span className="node-draft">待保存</span>}
     </div>}
-    <div className="node-meta"><span>{item.outgoing > 1 ? <><GitBranch size={11}/> {item.outgoing} 条路径</> : null}</span>{item.issueCount > 0 && <span className="node-issue"><AlertCircle size={11}/> {item.issueCount} 待确认</span>}{!item.issueCount && item.unknownCount > 0 && <span className="node-issue"><AlertCircle size={11}/> {item.unknownCount} 项未说明</span>}{item.draft && <span className="node-draft">有待恢复输入</span>}</div>
   </div>;
 }
 
@@ -283,6 +324,8 @@ function Workbench() {
   const [loadingError, setLoadingError] = useState('');
   const [connected, setConnected] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [compareNodeId, setCompareNodeId] = useState<string | null>(null);
+  const [compareDataExits, setCompareDataExits] = useState<{ source:string; ids:string[] } | null>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [group, setGroup] = useState('all');
   const [search, setSearch] = useState('');
@@ -297,7 +340,13 @@ function Workbench() {
   const [actionsFocusId, setActionsFocusId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [toast, setToast] = useState<Toast | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth > 760);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorWidth, setInspectorWidth] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem('6ak.workbench.inspector-width'));
+      return Number.isFinite(saved) && saved >= 380 && saved <= 640 ? saved : 480;
+    } catch { return 480; }
+  });
   const [narrowWindow, setNarrowWindow] = useState(() => window.innerWidth <= 760);
   const contentViewRef=useRef(contentView);contentViewRef.current=contentView;
   const graphBox=useRef<{width:number;height:number}|null>(null);
@@ -462,13 +511,11 @@ function Workbench() {
   const displayFields = currentNode?.fields || {};
   const selectedIssues = state ? nodeProseContext(state.model,selectedId||'').issues.filter(issue=>issue.status==='open') : [];
   const selectedClaims = currentNode?.claimIds.map(id => state?.model.claims.find(c => c.id === id)).filter((c): c is Claim => !!c) || [];
-  const currentGroup = state?.model.groups.find(g => g.id === group);
+  const displayGroups = useMemo(() => groupsForDisplay(state?.model), [state?.model]);
+  const selectedGroup = displayGroups.find(g => g.id === currentNode?.groupId);
   const scope = useMemo(() => getGraphScope(state?.model || { nodes: [], relations: [] }, group), [state?.model, group]);
-  const geometryEdges = useMemo(() => (scope.relations as Relation[]).map(relation => {
-    const label = relation.conditionClaimIds.map(id => state?.model.claims.find(c => c.id === id)?.text || '').join('；') || (['return', 'data', 'association'].includes(relation.type) ? relationLabels[relation.type] : '');
-    return { id: relation.id, from: relation.from, to: relation.to, type: relation.type, label, ...measureEdgeLabel(label) };
-  }), [scope.relations, state?.model]);
-  const ports = useMemo(() => relationPorts(geometryEdges), [geometryEdges]);
+  const exits = useMemo(() => graphExits(state?.model), [state?.model]);
+  const geometryEdges = useMemo(() => scopeLayoutEdges((scope.relations as Relation[]).map(relation => exits.get(relation.id)!.geometry), scope.contextIds), [scope, exits]);
   const visibleModelNodes = scope.nodes as ModelNode[];
   const visibleIds = scope.visibleIds;
   const crossRelations = scope.crossGroupRelations as Relation[];
@@ -500,27 +547,32 @@ function Workbench() {
 
   useEffect(() => {
     if (!state) return;
-    const next: FlowNode[] = visibleModelNodes.map((item, index) => ({
-      id: item.id, type: 'process', position: positionOverrides.current[viewKey]?.[item.id] || currentLayout?.positions[item.id] || (direction === 'DOWN' ? state.view.positions[item.id] : undefined) || { x: (index % 3) * 300 + 30, y: Math.floor(index / 3) * 260 + 30 },
-      selected: item.id === selectedId || selection.some(s => s.type === 'node' && s.id === item.id),
-      data: {
-        nodeId: item.id, title: item.title, direction, ports: ports.byNode.get(item.id),
-        onActions: () => { focusNode(item.id, false); setActionsFocusId(item.id); },
-        onDetails: () => { focusNode(item.id, false); setExpandedDetailsId(item.id); },
-        actions: (item.fields.actions || []).map(id => state.model.claims.find(c => c.id === id)).filter(Boolean),
-        hasDetails: item.claimIds.some(id => !(item.fields.actions || []).includes(id)),
-        role: (item.fields.role || []).map(id => state.model.claims.find(c => c.id === id)?.text).filter(Boolean).join('、').replace(/[。.]$/, ''),
-        groupId: item.groupId, groupIndex: state.model.groups.findIndex(g => g.id === item.groupId),
-        groupTitle: state.model.groups.find(g => g.id === item.groupId)?.title || item.groupId,
-        displayNo: state.model.nodes.filter(n => n.groupId === item.groupId).findIndex(n => n.id === item.id) + 1,
-        context: scope.contextIds.has(item.id),
-        issueCount: nodeProseContext(state.model,item.id).issues.filter(issue=>issue.status==='open').length,
-        unknownCount: item.claimIds.filter(id => state.model.claims.some(c => c.id === id && c.origin === 'unknown')).length,
-        changed: (state.changes || []).slice(0, 1).some(c => c.nodeIds?.includes(item.id) || c.targetIds?.includes(item.id) || c.nodeId === item.id),
-        draft: !!drafts[item.id]?.dirty, outgoing: state.model.relations.filter(r => r.from === item.id).length,
-        incoming: state.model.relations.filter(r => r.to === item.id).length,
-      },
-    }));
+    const next: FlowNode[] = visibleModelNodes.map((item, index) => {
+      const actionClaims = (item.fields.actions || []).map(id => state.model.claims.find(c => c.id === id)).filter((c): c is Claim => !!c);
+      const fallbackClaimId = !actionClaims.length ? (item.fields.rules?.[0] || item.fields.trigger?.[0] || item.fields.output?.[0] || item.fields.input?.[0] || item.claimIds[0]) : undefined;
+      return {
+        id: item.id, type: 'process', position: positionOverrides.current[viewKey]?.[item.id] || currentLayout?.positions[item.id] || (direction === 'DOWN' ? state.view.positions[item.id] : undefined) || { x: (index % 3) * 300 + 30, y: Math.floor(index / 3) * 260 + 30 },
+        selected: item.id === selectedId || selection.some(s => s.type === 'node' && s.id === item.id),
+        data: {
+          nodeId: item.id, title: item.title, direction,
+          modelOrder: state.model.nodes.indexOf(item), compareExits: () => setCompareNodeId(item.id),
+          actions: actionClaims,
+          fallbackPreview: fallbackClaimId ? (state.model.claims.find(c => c.id === fallbackClaimId)?.text || '') : '',
+          showGroupLabel: group === 'all',
+          role: (item.fields.role || []).map(id => state.model.claims.find(c => c.id === id)?.text).filter(Boolean).join('、').replace(/[。.]$/, ''),
+          system: (item.fields.system || []).map(id => state.model.claims.find(c => c.id === id)?.text).filter(Boolean).join('、').replace(/[。.]$/, ''),
+          groupId: item.groupId, groupIndex: state.model.groups.findIndex(g => g.id === item.groupId),
+          groupTitle: displayGroups.find(g => g.id === item.groupId)?.title || item.groupId,
+          displayNo: state.model.nodes.filter(n => n.groupId === item.groupId).findIndex(n => n.id === item.id) + 1,
+          context: scope.contextIds.has(item.id),
+          issueCount: nodeProseContext(state.model, item.id).issues.filter(issue => issue.status === 'open').length,
+          unknownCount: item.claimIds.filter(id => state.model.claims.some(c => c.id === id && c.origin === 'unknown')).length,
+          changed: (state.changes || []).slice(0, 1).some(c => c.nodeIds?.includes(item.id) || c.targetIds?.includes(item.id) || c.nodeId === item.id),
+          draft: !!drafts[item.id]?.dirty, outgoing: state.model.relations.filter(r => r.from === item.id).length,
+          incoming: state.model.relations.filter(r => r.to === item.id).length,
+        },
+      };
+    });
     for (const node of next) {
       node.data.layoutScopeId = group;
       node.data.layoutViewKey = viewKey;
@@ -533,29 +585,29 @@ function Workbench() {
       // hides unchanged DOM nodes until a resize observation happens again.
       return old?.data.layoutViewKey === viewKey ? { ...n, measured: old.measured, ...(old.dragging ? { position: old.position, dragging: true } : {}) } : n;
     }));
-  }, [state, visibleModelNodes, selectedId, drafts, selection, scope.contextIds, ports, group, direction, viewKey, moveVersion]);
+  }, [state, visibleModelNodes, selectedId, drafts, selection, scope.contextIds, group, direction, viewKey, moveVersion]);
 
-  const geometryNodes = useMemo(() => flowNodes.map(node => ({ id: node.id, ...node.position, width: node.measured?.width || cardWidth, height: node.measured?.height || 113 })), [flowNodes, cardWidth]);
+  const geometryNodes = useMemo(() => flowNodes.map(node => ({ id: node.id, order: Number(node.data.modelOrder), ...node.position, width: node.measured?.width || cardWidth, height: node.measured?.height || 113 })), [flowNodes, cardWidth]);
+  const ports = useMemo(() => relationPorts(geometryEdges, geometryNodes, direction), [geometryEdges, geometryNodes, direction]);
+  const displayedNodes = useMemo(() => flowNodes.map(node => ({ ...node, data: { ...node.data, ports: ports.byNode.get(node.id) } })), [flowNodes, ports]);
   const geometryKey = useMemo(() => routeGeometryKey(geometryNodes, geometryEdges, direction, ports), [geometryNodes, geometryEdges, direction, ports]);
-  const measuredInputKey = useMemo(() => layoutInputKey(geometryNodes, geometryEdges, direction), [geometryNodes, geometryEdges, direction]);
+  const flowSpace = direction === 'RIGHT' ? canvasSize.width - (navigationCollapsed ? 32 : 220) : canvasSize.height;
+  const maxLeafDepth = Math.max(1, Math.floor(flowSpace / (direction === 'RIGHT' ? cardWidth + 80 : 240)));
+  const measuredInputKey = useMemo(() => layoutInputKey(geometryNodes, geometryEdges, direction, maxLeafDepth), [geometryNodes, geometryEdges, direction, maxLeafDepth]);
+  const leafFrames = useMemo(() => dataLeafGrids(geometryEdges, maxLeafDepth, manualNodeIds).flatMap(({ ids, depth }) => {
+    const members = geometryNodes.filter(node => ids.includes(node.id));
+    if (members.length !== ids.length || new Set(members.map(n => direction === 'RIGHT' ? n.x : n.y)).size !== depth) return [];
+    const x = Math.min(...members.map(n => n.x)) - 13, y = Math.min(...members.map(n => n.y)) - 30;
+    const right = Math.max(...members.map(n => n.x + n.width)) + 13, bottom = Math.max(...members.map(n => n.y + n.height)) + 13;
+    if (geometryNodes.some(n => !ids.includes(n.id) && n.x < right && n.x + n.width > x && n.y < bottom && n.y + n.height > y)) return [];
+    const bus = planDataBus(ids, geometryNodes, geometryEdges, ports, direction);
+    return [{ key: ids[0], count: ids.length, x, y, width: right - x, height: bottom - y, bus }];
+  }), [geometryEdges, maxLeafDepth, manualNodeIds, geometryNodes, direction, ports]);
+  const sharedBranches = useMemo(() => new Map(leafFrames.flatMap(box => (box.bus?.branches ?? []).map(branch => [branch.id, branch] as const))), [leafFrames]);
+  const independentEdges = useMemo(() => geometryEdges.filter(e => !sharedBranches.has(e.id)), [geometryEdges, sharedBranches]);
   const measuredInputKeyRef = useRef(measuredInputKey); measuredInputKeyRef.current = measuredInputKey;
-  const drawings = useProcessRoutes(geometryNodes, geometryEdges, direction, ports, geometryKey, currentLayout?.routes);
+  const drawings = useProcessRoutes(geometryNodes, independentEdges, direction, ports, geometryKey, currentLayout?.routes);
 
-  const edges = useMemo<FlowEdge[]>(() => {
-    if (!state) return [];
-    const selectedRelations = new Set(selection.filter(item => item.type === 'relation').map(item => item.id));
-    return geometryEdges.map(relation => {
-      const selected = selectedRelations.has(relation.id);
-      const hovered = relation.id === hoveredEdgeId;
-      const highlighted = selected || hovered || (!hoveredEdgeId && !selectedRelations.size && relation.from === selectedId);
-      const handles = ports.byEdge.get(relation.id)!;
-      return { id: relation.id, source: relation.from, target: relation.to, type: 'process',
-        sourceHandle: handles.source.id, targetHandle: handles.target.id,
-        selected, zIndex: hovered ? 1 : 0, markerEnd: { type: MarkerType.ArrowClosed, width: 17, height: 17, color: processEdgeColor(relation.type, highlighted) },
-        data: { kind: relation.type, highlighted, label: relation.label, labelWidth: relation.labelWidth,
-          labelHeight: relation.labelHeight, drawing: drawings?.get(relation.id) } };
-    });
-  }, [state?.model, geometryEdges, ports, drawings, selection, selectedId, hoveredEdgeId]);
   useEffect(() => setHoveredEdgeId(null), [viewKey]);
 
   const persistView = useCallback(async (patch: Record<string, unknown>) => { try { const next = await api<WorkState>('/api/workbench/view', patch, 'PATCH'); acceptState(next); } catch { notify('布局尚未保存，内容修改不受影响。', 'error'); } }, [acceptState, notify]);
@@ -592,7 +644,7 @@ function Workbench() {
       const element = elements.get(node.id);
       return !element || element.offsetWidth !== node.measured!.width || element.offsetHeight !== node.measured!.height;
     })) return null;
-    return nodes.map(node => ({ id: node.id, ...node.position, width: node.measured!.width!, height: node.measured!.height! }));
+    return nodes.map(node => ({ id: node.id, order: Number(node.data.modelOrder), ...node.position, width: node.measured!.width!, height: node.measured!.height! }));
   };
 
   const runLayout = async (action: 'initialize' | 'arrange' | 'reset' | 'undo' | 'release' | 'refresh' | 'measure') => {
@@ -601,7 +653,7 @@ function Workbench() {
     const measuredNodes = readMeasuredLayoutNodes();
     const automatic = action === 'refresh' || action === 'measure';
     if (automatic && (!supportsLayoutRefresh || contentViewRef.current !== 'graph' || !measuredNodes)) return;
-    const inputKey = measuredNodes ? layoutInputKey(measuredNodes, geometryEdges, direction) : measuredInputKey;
+    const inputKey = measuredNodes ? layoutInputKey(measuredNodes, geometryEdges, direction, maxLeafDepth) : measuredInputKey;
     const scopeId = group, layoutDirection = direction, key = viewKey, request = ++layoutRequest.current;
     const layout = scopedLayout(initial, scopeId, layoutDirection);
     const baseRevision = layout?.revision || 0;
@@ -617,13 +669,13 @@ function Workbench() {
     }
     setLayoutOperation(action); setLayoutError('');
     try {
-      let patch: Record<string, unknown> = { scopeId, direction: layoutDirection, action: action === 'arrange' ? 'reset' : action, baseRevision };
+      let patch: Record<string, unknown> = { scopeId, direction: layoutDirection, action, baseRevision };
       if (supportsLayoutRefresh && action !== 'release') patch = { ...patch, inputKey, baseModelHash: initial.modelHash };
       if (action === 'arrange' || action === 'reset' || action === 'initialize' || action === 'refresh') {
-        const nodes = (measuredNodes || rf.getNodes().filter(node => visibleIds.has(node.id)).map(node => ({ id: node.id, ...node.position, width: node.measured?.width || cardWidth, height: node.measured?.height || 113 })))
+        const nodes = (measuredNodes || rf.getNodes().filter(node => visibleIds.has(node.id)).map(node => ({ id: node.id, order: Number(node.data.modelOrder), ...node.position, width: node.measured?.width || cardWidth, height: node.measured?.height || 113 })))
           .map(node => ({ ...node, ...(action === 'initialize' && layoutDirection === 'DOWN' ? initial.view.positions[node.id] : {}) }));
-        const pinned = action === 'refresh' ? layout?.manualNodeIds || [] : action === 'initialize' && layoutDirection === 'DOWN' ? initial.view.manualNodeIds || [] : [];
-        const result = await arrangeGraph({ nodes, edges: geometryEdges, direction: layoutDirection, manualNodeIds: pinned });
+        const pinned = action === 'refresh' || action === 'arrange' ? layout?.manualNodeIds || [] : action === 'initialize' && layoutDirection === 'DOWN' ? initial.view.manualNodeIds || [] : [];
+        const result = await arrangeGraph({ nodes, edges: geometryEdges, direction: layoutDirection, manualNodeIds: pinned, maxLeafDepth });
         if (request !== layoutRequest.current || viewKeyRef.current !== key) return;
         // A resize/content update can finish while the worker is arranging.
         // Discard that result before it can overwrite newer measured geometry.
@@ -645,7 +697,7 @@ function Workbench() {
           if (request === layoutRequest.current && viewKeyRef.current === key) frameViewport('initialize');
         });
       }
-      if (action !== 'initialize' && !automatic) notify(action === 'arrange' || action === 'reset' ? '已重新整理当前图，清除手动固定位置；可撤销恢复' : action === 'undo' ? '已撤销整理，后续手动调整仍保留' : '已解除固定，下次整理会包含此节点');
+      if (action !== 'initialize' && !automatic) notify(action === 'arrange' || action === 'reset' ? (action === 'reset' ? '已重置位置，可撤销恢复' : '已整理当前图，保留手动固定位置') : action === 'undo' ? '已撤销整理，后续手动调整仍保留' : '已解除固定，下次整理会包含此节点');
     } catch (cause) {
       if (request === layoutRequest.current && viewKeyRef.current === key) setLayoutError(action === 'initialize' ? `本组布局尚未生成，可点击“整理当前图”重试。${(cause as Error).message}` : automatic ? `自动整理尚未完成，可点击“整理当前图”重试。${(cause as Error).message}` : (cause as Error).message);
       void fetchState();
@@ -684,6 +736,7 @@ function Workbench() {
   const focusNode = useCallback((id: string, changeGroup = true, revealInspector = true) => {
     const s = stateRef.current; const n = s?.model.nodes.find(n => n.id === id); if (!s || !n) return;
     const previousDraft = selectedRef.current ? draftsRef.current[selectedRef.current] : undefined; if (previousDraft?.dirty) { const timer = bufferTimers.current.get(previousDraft.nodeId); if (timer) clearTimeout(timer); void persistBuffer(previousDraft); }
+    if (selectedRef.current !== id) setEditingNodeId(null);
     setSelectedId(id); setSelection([{ type: 'node', id, label: n.title }]); if (revealInspector) setInspectorOpen(true); setError(''); setSearch(''); setChosenText(null);
     writeLocal(cacheKey('selected'), id);
     if (changeGroup) { setGroup(n.groupId); writeLocal(cacheKey('group'), n.groupId); }
@@ -774,7 +827,7 @@ function Workbench() {
     const observer = new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(measure, 150); });
     observer.observe(element);
     return () => { clearTimeout(resizeTimer); observer.disconnect(); viewportRequest.current++; if (viewportFrame.current !== null) cancelAnimationFrame(viewportFrame.current); };
-  }, [Boolean(state), frameViewport]);
+  }, [Boolean(state), frameViewport, contentView]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     if (viewKeyRef.current !== viewKey) return;
@@ -797,8 +850,25 @@ function Workbench() {
     else setInspectorOpen(true);
     const target = resolveAgentTarget(model, { type: 'relation', id, label: '' });
     if (target) setSelection([target]);
-    if (scrollToBranch) setTimeout(() => document.querySelector(`[data-branch-id="${id}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 100);
+    if (scrollToBranch) setTimeout(() => document.querySelector(`[data-branch-id="${id}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 100);
   }, [focusNode]);
+
+  const edges = useMemo<FlowEdge[]>(() => {
+    if (!state) return [];
+    const selectedRelations = new Set(selection.filter(item => item.type === 'relation').map(item => item.id));
+    return geometryEdges.map(relation => {
+      const selected = selectedRelations.has(relation.id);
+      const hovered = relation.id === hoveredEdgeId;
+      const branch = sharedBranches.get(relation.id);
+      const highlighted = selected || hovered || (!hoveredEdgeId && !selectedRelations.size && (branch ? relation.to === selectedId : relation.from === selectedId));
+      const handles = ports.byEdge.get(relation.id)!;
+      return { id: relation.id, source: relation.from, target: relation.to, type: 'process',
+        sourceHandle: handles.source.id, targetHandle: handles.target.id,
+        selected, zIndex: hovered ? 1 : 0, markerEnd: { type: MarkerType.ArrowClosed, width: 17, height: 17, color: processEdgeColor(relation.type, highlighted) },
+        data: { kind: relation.type, highlighted, tail: branch?.tail, openRelation: focusRelation, accessibleName: exits.get(relation.id)?.accessibleName, label: branch ? '' : relation.label, labelWidth: relation.labelWidth,
+          labelHeight: relation.labelHeight, drawing: drawings?.get(relation.id) } };
+    });
+  }, [state?.model, geometryEdges, ports, drawings, selection, selectedId, hoveredEdgeId, focusRelation, exits, sharedBranches]);
 
   const selectedRelationId = selection.length === 1 && selection[0].type === 'relation' ? selection[0].id : undefined;
   useEffect(() => {
@@ -840,7 +910,7 @@ function Workbench() {
   async function saveNode() {
     if (!draft || !state || !currentNode) return;
     const corrections = textChanges(draft);
-    if (!Object.keys(corrections).length) return;
+    if (!Object.keys(corrections).length) { setEditingNodeId(null); return; }
     const submitted = clone(draft);
     submitted.groupId = submitted.baseGroupId;
     for (const branch of submitted.branches) {
@@ -863,10 +933,54 @@ function Workbench() {
         if (retained) { draftsRef.current = { ...draftsRef.current, [draft.nodeId]: retained }; setDrafts(draftsRef.current); await persistBuffer(retained); }
         else setError('已保存提交时的内容。随后输入已保留；部分原句身份变化，请复制相关引用，在 AgentApp 中核对后继续。');
       } else await clearDraft(draft.nodeId);
+      setEditingNodeId(null);
       setLastSavedAt(new Date().toISOString());
       notify(next.lastSave?.message || (draft.intent === 'proposal' ? '待定建议已保存，可以稍后继续整理。' : '文案已保存。'));
     } catch (cause) { const error = cause as Error & { status?: number }; setError(error.status === 409 ? `工作稿已有新修改。你的输入已保留，重新核对后再保存。${error.message}` : error.message); }
     finally { setSaving(false); }
+  }
+
+  function startCopyEdit() {
+    if (!currentNode || !state) return;
+    if (!draftsRef.current[currentNode.id]) {
+      const initialDraft = draftFor(state, currentNode.id);
+      if (initialDraft) {
+        draftsRef.current = { ...draftsRef.current, [currentNode.id]: initialDraft };
+        setDrafts(draftsRef.current);
+      }
+    }
+    setEditingNodeId(currentNode.id);
+    setChosenText(null);
+    setError('');
+  }
+
+  function cancelCopyEdit() {
+    restoreCopyText();
+    setEditingNodeId(null);
+    setError('');
+  }
+
+  function startResizeInspector(event: React.PointerEvent<HTMLDivElement>) {
+    if (narrowWindow) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = inspectorWidth;
+    let latestWidth = startWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const onMove = (moveEvent: PointerEvent) => {
+      latestWidth = Math.max(380, Math.min(640, Math.round(startWidth + (startX - moveEvent.clientX))));
+      setInspectorWidth(latestWidth);
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      try { localStorage.setItem('6ak.workbench.inspector-width', String(latestWidth)); } catch { /* ignore */ }
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   }
 
   function rebaseDraft() {
@@ -1110,7 +1224,49 @@ function Workbench() {
     if(legacyStructureDraft&&item.id===savedNode?.id)inputs.push({id:'legacy-structure',label:'以前保留的结构草稿',text:'历史结构草稿，仅作待核对建议。\n'+JSON.stringify(legacyStructureDraft,null,2)});
     return [item.id,inputs];
   }));
-  const nodeActions = savedNode&&<div className="node-context-actions"><button className="secondary-button" data-testid="organize-node" onClick={()=>locateProse('materials')}><FileText size={14}/>整理此节点</button></div>;
+  const isSharedClaim = (claimId: string) => state.model.nodes.filter(item => item.claimIds.includes(claimId)).length > 1;
+  const claimValue = (claimId: string) => (editingCopy ? draft?.claims : readingDraft?.claims)?.find(c => c.id === claimId)?.text ?? state.model.claims.find(c => c.id === claimId)?.text ?? '';
+  const roleIds = displayFields.role || [];
+  const systemIds = displayFields.system || [];
+  const sameRoleSystem = roleIds.length > 0 && roleIds.length === systemIds.length && roleIds.every((id, index) => id === systemIds[index]);
+  const roleText = roleIds.map(claimValue).filter(Boolean).join('、').replace(/[。.]$/, '');
+  const systemText = systemIds.map(claimValue).filter(Boolean).join('、').replace(/[。.]$/, '');
+  const shownMetaIds = new Set([...roleIds, ...systemIds]);
+  const distinctTriggerIds = (displayFields.trigger || []).filter(id => !shownMetaIds.has(id));
+  const distinctInputIds = (displayFields.input || []).filter(id => !shownMetaIds.has(id) && !distinctTriggerIds.includes(id));
+  const actionIds = displayFields.actions || [];
+  const distinctOutputIds = (displayFields.output || []).filter(id => !shownMetaIds.has(id) && !actionIds.includes(id));
+  const nodeRuleIds = displayFields.rules || [];
+  const linkedRules = currentNode ? nodeProseContext(state.model, currentNode.id).rules : [];
+  const seenRuleClaimIds = new Set(nodeRuleIds);
+  const extraLinkedRules = linkedRules.map(rule => ({
+    ...rule,
+    extraClaimIds: rule.claimIds.filter(id => !seenRuleClaimIds.has(id) && !actionIds.includes(id)),
+  })).filter(rule => rule.extraClaimIds.length > 0 || !nodeRuleIds.length);
+  const hasRulesBlock = nodeRuleIds.length > 0 || extraLinkedRules.length > 0;
+  const renderEditableClaim = (claimId: string, label: string, testId?: string) => {
+    const shared = isSharedClaim(claimId);
+    return <CompactTextarea
+      key={claimId}
+      readOnly={shared}
+      title={shared ? '此陈述被多个节点共用，请交给 Agent 统一修改' : undefined}
+      aria-label={label}
+      data-testid={testId}
+      data-claim-id={claimId}
+      value={claimValue(claimId)}
+      onChange={event => updateDraft(currentNode!.id, next => {
+        const claim = next.claims.find(c => c.id === claimId);
+        if (claim) claim.text = event.target.value;
+      })}
+    />;
+  };
+  const metaTags: Array<{ label: string; text: string; isLong: boolean; ids: string[] }> = [];
+  if (sameRoleSystem && roleText) {
+    metaTags.push({ label: '角色 / 系统', text: roleText, isLong: roleText.length > 36, ids: roleIds });
+  } else {
+    if (roleText) metaTags.push({ label: '角色', text: roleText, isLong: roleText.length > 36, ids: roleIds });
+    if (systemText) metaTags.push({ label: '系统', text: systemText, isLong: systemText.length > 36, ids: systemIds });
+  }
 
   return <div className={`app-shell ${inspectorOpen&&!showContent ? '' : 'inspector-closed'}`} data-layout-direction={direction} data-content-view={showContent ? 'content' : 'graph'}>
     <header className="app-header">
@@ -1128,13 +1284,13 @@ function Workbench() {
       <main className="canvas-section">
         <div className="canvas-toolbar">
           {<div className="content-view-switch" role="group" aria-label="主视图"><button aria-pressed={!showContent} data-testid="view-graph" onClick={() => chooseContentView('graph')}>流程图</button><button aria-pressed={showContent} data-testid="view-content" onClick={() => chooseContentView('content')}>节点内容</button></div>}
-          {!showContent&&<div className="search-wrap"><Search size={14} /><input aria-label="查找节点" placeholder="查找节点或内容" value={search} onChange={e => setSearch(e.target.value)} />{search && <button className="clear-search" aria-label="清除查找" onClick={() => setSearch('')}><X size={13} /></button>}{search.trim() && <div className="search-results">{searchResults.length ? searchResults.map(n => <button key={n.id} onClick={() => focusNode(n.id,!visibleIds.has(n.id))}><span>{n.title}</span><small>{state.model.groups.find(g => g.id === n.groupId)?.title}</small><ArrowRight size={13} /></button>) : <p>没有找到匹配节点。试试其他名称或内容。</p>}</div>}</div>}
+          {!showContent&&<div className="search-wrap"><Search size={14} /><input aria-label="查找节点" placeholder="查找节点或内容" value={search} onChange={e => setSearch(e.target.value)} />{search && <button className="clear-search" aria-label="清除查找" onClick={() => setSearch('')}><X size={13} /></button>}{search.trim() && <div className="search-results">{searchResults.length ? searchResults.map(n => <button key={n.id} onClick={() => focusNode(n.id,!visibleIds.has(n.id))}><span>{n.title}</span><small>{displayGroups.find(g => g.id === n.groupId)?.title}</small><ArrowRight size={13} /></button>) : <p>没有找到匹配节点。试试其他名称或内容。</p>}</div>}</div>}
           <div className="canvas-tools">
             {!showContent && <div className="graph-tool-menu" data-open={graphToolsOpen}><button className="graph-tool-toggle" aria-expanded={graphToolsOpen} aria-controls="graph-tool-items" onClick={()=>setGraphToolsOpen(open=>!open)}>图工具<ChevronDown size={12}/></button><div className="graph-tool-items" id="graph-tool-items">
             <select className="layout-direction" aria-label="流程图方向" data-testid="layout-direction" value={directionMode} disabled={savingDirection || !!layoutOperation || movingCount > 0 || draggingNode || !!Object.keys(positionOverrides.current[viewKey] || {}).length} onChange={event => void changeLayoutDirection(event.target.value as DirectionMode)} title="自动按画布宽高选择；每个分组分别记住设置">
               <option value="AUTO">自动 · {automaticDirection === 'RIGHT' ? '横向' : '纵向'}</option><option value="DOWN">纵向</option><option value="RIGHT">横向</option>
             </select>
-            <button className="quiet-button arrange-layout" data-testid="arrange-layout" aria-label="整理当前图" title="重新整理当前图，覆盖手动位置；可撤销恢复" disabled={!directionReady || savingDirection || awaitingInitialLayout || !!layoutOperation || movingCount > 0 || !!Object.keys(positionOverrides.current[viewKey] || {}).length} onClick={() => void runLayout('arrange')}>{layoutOperation === 'arrange' || awaitingInitialLayout ? <LoaderCircle size={14} className="spin" /> : <Network size={14} />}<span>整理当前图</span></button>
+            <button className="quiet-button arrange-layout" data-testid="arrange-layout" aria-label="整理当前图" title="整理当前图，保留手动固定位置，可撤销恢复" disabled={!directionReady || savingDirection || awaitingInitialLayout || !!layoutOperation || movingCount > 0 || !!Object.keys(positionOverrides.current[viewKey] || {}).length} onClick={() => void runLayout('arrange')}>{layoutOperation === 'arrange' || awaitingInitialLayout ? <LoaderCircle size={14} className="spin" /> : <Network size={14} />}<span>整理当前图</span></button>
             <button className="quiet-button reset-layout" data-testid="reset-layout" aria-label="重置位置" title="重置当前图全部位置（含固定节点），可撤销恢复" disabled={!directionReady || savingDirection || !manualNodeIds.length || awaitingInitialLayout || !!layoutOperation || movingCount > 0 || !!Object.keys(positionOverrides.current[viewKey] || {}).length} onClick={() => void runLayout('reset')}><ListRestart size={16} /><span>重置位置</span></button>
             <button className="icon-button" data-testid="undo-layout" aria-label="撤销本组整理" title="撤销本组整理" disabled={!directionReady || savingDirection || !currentLayout?.previous || !!layoutOperation || movingCount > 0} onClick={() => void runLayout('undo')}><Undo2 size={16} /></button>
             <button className="icon-button" title="适应当前图" aria-label="适应当前图" onClick={() => frameViewport('fit')}><Maximize2 size={16} /></button>
@@ -1142,18 +1298,22 @@ function Workbench() {
             <button className="quiet-button copy-top" disabled={copyBusy} onClick={() => void copyReference()} data-testid="copy-reference" aria-label="复制引用" title="复制已保存内容的引用"><Copy size={14} /><span>复制引用</span></button>
             <button className="icon-button" title="撤销最近一次内容修改" aria-label="撤销最近一次内容修改" onClick={() => void undo()} data-testid="undo"><RotateCcw size={16} /></button>
 
-            {!showContent&&<button className="icon-button" title={inspectorOpen ? '收起节点详情' : '打开节点详情'} aria-label={inspectorOpen ? '收起节点详情' : '打开节点详情'} onClick={() => setInspectorOpen(!inspectorOpen)}>{inspectorOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>}
+            {!showContent&&<button className="icon-button" data-testid="toggle-inspector" title={inspectorOpen ? '收起节点详情' : '打开节点详情'} aria-label={inspectorOpen ? '收起节点详情' : '打开节点详情'} onClick={() => setInspectorOpen(!inspectorOpen)}>{inspectorOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</button>}
           </div>
         </div>
         <div className="canvas-stage">
         <div className={`graph-area${showContent ? ' is-covered' : ''}${awaitingInitialLayout ? ' is-initializing' : ''}`} ref={graphElement} style={showContent&&graphBox.current?{width:graphBox.current.width,height:graphBox.current.height,flex:"none"}:undefined} data-testid="graph-canvas" data-direction={direction} onKeyDownCapture={focusGraphObjectOnKey} aria-busy={awaitingInitialLayout || !directionReady}>
-          {!showContent && <div className="graph-node-actions">{nodeActions}</div>}
           <nav className={`group-navigator ${navigationCollapsed ? 'is-collapsed' : ''}`} aria-label="流程分组导航" data-testid="group-navigator">
             <button className="navigator-toggle" aria-label={navigationCollapsed ? '展开分组导航' : '收起分组导航'} aria-expanded={!navigationCollapsed} onClick={() => setNavigationCollapsed(!navigationCollapsed)}><Layers3 size={15} /><span>整理分组</span><ChevronDown size={13} /></button>
-            {!navigationCollapsed && <div className="navigator-list"><button className={`navigator-item all-groups ${group === 'all' ? 'active' : ''}`} aria-current={group === 'all' ? 'page' : undefined} onClick={() => changeGroup('all')} data-testid="group-all"><Layers3 size={13} /><span>完整流程</span><small>{state.model.nodes.length}</small></button>{state.model.groups.map((g, i) => <button key={g.id} style={groupStyle(i)} className={`navigator-item ${group === g.id ? 'active' : ''}`} aria-current={group === g.id ? 'page' : undefined} onClick={() => changeGroup(g.id)} data-testid={`group-${g.id}`}><span className="navigator-index">{String(i + 1).padStart(2, '0')}</span><span>{g.title}</span><small>{state.model.nodes.filter(n => n.groupId === g.id).length}</small></button>)}<p className="navigator-note">分组视图同时显示直接相连的上下游。</p></div>}
+            {!navigationCollapsed && <div className="navigator-list"><button className={`navigator-item all-groups ${group === 'all' ? 'active' : ''}`} aria-current={group === 'all' ? 'page' : undefined} onClick={() => changeGroup('all')} data-testid="group-all"><Layers3 size={13} /><span>完整流程</span><small>{state.model.nodes.length}</small></button>{displayGroups.map((g, i) => <button key={g.id} style={groupStyle(i)} className={`navigator-item ${group === g.id ? 'active' : ''}`} aria-current={group === g.id ? 'page' : undefined} onClick={() => changeGroup(g.id)} data-testid={`group-${g.id}`}><span className="navigator-index">{String(i + 1).padStart(2, '0')}</span><span>{g.title}</span><small>{state.model.nodes.filter(n => n.groupId === g.id).length}</small></button>)}<p className="navigator-note">分组视图同时显示直接相连的上下游。</p></div>}
           </nav>
-          <ReactFlow key={viewKey} nodes={flowNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={onNodesChange} onNodeClick={(_event, node) => focusNode(node.id, false)} onEdgeMouseEnter={(_event, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)} onEdgeClick={(_event, edge) => focusRelation(edge.id)} onNodeDragStart={() => { layoutRequest.current++; setLayoutOperation(null); setDraggingNode(true); }} onNodeDragStop={() => setDraggingNode(false)} onMoveEnd={(_event, viewport) => { if (viewTimer.current) clearTimeout(viewTimer.current); viewTimer.current = setTimeout(() => { if (viewKeyRef.current !== viewKey || !!currentLayout !== !!scopedLayout(stateRef.current, group, direction)) return; const key = cacheKey('viewport-scope-v2'); writeLocal(key, { ...readLocal<Record<string, Viewport>>(key, {}), [viewKey]: { ...viewport, scoped: !!currentLayout } }); }, 200); }} onSelectionChange={onGraphSelectionChange} onPaneClick={() => { setSelectedId(null); setSelection([]); setChosenText(null); setEditingNodeId(null); setError(''); }} minZoom={.25} maxZoom={1.7} nodesDraggable nodesConnectable={false} deleteKeyCode={null} selectionKeyCode="Shift" multiSelectionKeyCode="Shift" attributionPosition="bottom-right" proOptions={{ hideAttribution: true }} defaultViewport={{ x: 100, y: 50, zoom: .88 }}>
+          <ReactFlow key={viewKey} nodes={displayedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={onNodesChange} onNodeClick={(_event, node) => focusNode(node.id, false)} onEdgeMouseEnter={(_event, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)} onEdgeClick={(_event, edge) => focusRelation(edge.id)} onNodeDragStart={() => { layoutRequest.current++; setLayoutOperation(null); setDraggingNode(true); }} onNodeDragStop={() => setDraggingNode(false)} onMoveEnd={(_event, viewport) => { if (viewTimer.current) clearTimeout(viewTimer.current); viewTimer.current = setTimeout(() => { if (viewKeyRef.current !== viewKey || !!currentLayout !== !!scopedLayout(stateRef.current, group, direction)) return; const key = cacheKey('viewport-scope-v2'); writeLocal(key, { ...readLocal<Record<string, Viewport>>(key, {}), [viewKey]: { ...viewport, scoped: !!currentLayout } }); }, 200); }} onSelectionChange={onGraphSelectionChange} onPaneClick={() => { setSelectedId(null); setSelection([]); setChosenText(null); setEditingNodeId(null); setInspectorOpen(false); setError(''); }} minZoom={.25} maxZoom={1.7} nodesDraggable nodesConnectable={false} deleteKeyCode={null} selectionKeyCode="Shift" multiSelectionKeyCode="Shift" attributionPosition="bottom-right" proOptions={{ hideAttribution: true }} defaultViewport={{ x: 100, y: 50, zoom: .88 }}>
             <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#cbd5d0" />
+            <ViewportPortal>{leafFrames.map(box => <React.Fragment key={box.key}>
+              <div data-testid="data-leaf-grid" className="data-leaf-grid" style={{left:box.x,top:box.y,width:box.width,height:box.height}}>{!box.bus && `数据交付 · ${box.count} 个去向`}</div>
+              {box.bus && <DataBusOverlay bus={box.bus} activeId={hoveredEdgeId || selectedRelationId || geometryEdges.find(e => e.to === selectedId && sharedBranches.has(e.id))?.id}
+                open={()=>setCompareDataExits({source:box.bus!.source,ids:box.bus!.ids})}/>}
+            </React.Fragment>)}</ViewportPortal>
           </ReactFlow>
           {awaitingInitialLayout && <div className="layout-loading" role="status"><LoaderCircle size={15} className="spin" />正在整理本组与相邻节点…</div>}
           {layoutError && <div className="layout-error" role="alert"><AlertCircle size={14} /><span>{layoutError}</span>{Object.keys(positionOverrides.current[viewKey] || {}).length > 0 && <button onClick={() => saveMovedPositions(group, { ...positionOverrides.current[viewKey] }, direction)}>重试保存位置</button>}<button aria-label="关闭布局提示" onClick={() => setLayoutError('')}><X size={13} /></button></div>}
@@ -1161,7 +1321,7 @@ function Workbench() {
           <div className="zoom-tools"><button aria-label="放大" onClick={() => void rf.zoomIn({ duration: 150 })}><Plus size={16} /></button><button aria-label="缩小" onClick={() => void rf.zoomOut({ duration: 150 })}><Minus size={16} /></button></div>
           {selection.length > 1 && <button className="selection-chip" disabled={copyBusy} onClick={() => void copyReference()}><Copy size={14} /> 复制这 {selection.length} 个对象的引用 <ArrowRight size={13} /></button>}
         </div>
-        <NodeContent nodes={state.model.nodes} groups={state.model.groups} claimText={id=>state.model.claims.find(claim=>claim.id===id)?.text||''}
+        <NodeContent nodes={state.model.nodes} groups={displayGroups} claimText={id=>state.model.claims.find(claim=>claim.id===id)?.text||''}
           nodeNumber={item=>state.model.nodes.filter(n=>n.groupId===item.groupId).findIndex(n=>n.id===item.id)+1}
           onSelect={id=>focusNode(id,false,false)} onMaterialEdit={()=>{}}
           enabled={materialsEnabled} materials={state.materials} sources={state.model.sources} legacyInputs={legacyInputs}
@@ -1175,103 +1335,207 @@ function Workbench() {
         {!showContent && connectionsOpen && <div className="connections-popover"><div className="popover-heading">跨组联系<button className="icon-button" onClick={() => setConnectionsOpen(false)} aria-label="关闭跨组联系"><X size={14} /></button></div>{crossRelations.map(r => <button key={r.id} onClick={() => { focusNode(scope.coreIds.has(r.from) ? r.to : r.from, false); setConnectionsOpen(false); }}><span>{state.model.nodes.find(n => n.id === r.from)?.title}</span><ArrowRight size={13} /><span>{state.model.nodes.find(n => n.id === r.to)?.title}</span><small>{relationLabels[r.type]}</small></button>)}</div>}
       </main>
 
-      {!showContent && inspectorOpen && <aside className={`inspector is-reading-copy`} data-testid="node-inspector" aria-label="节点详情">
+      {!showContent && inspectorOpen && <aside
+        className={`inspector ${editingCopy ? 'is-editing-copy' : 'is-reading-copy'}`}
+        style={!narrowWindow ? ({ '--editor-width': `${inspectorWidth}px` } as React.CSSProperties) : undefined}
+        data-testid="node-inspector"
+        aria-label="节点详情"
+        onKeyDown={event => {
+          if (event.key === 'Escape') {
+            event.stopPropagation();
+            if (editingCopy) cancelCopyEdit();
+            else setInspectorOpen(false);
+          } else if (editingCopy && (event.metaKey || event.ctrlKey) && event.key === 'Enter' && hasTextChanges && !saving) {
+            event.preventDefault();
+            void saveNode();
+          }
+        }}>
+        {!narrowWindow && <div className="inspector-resizer" role="separator" aria-orientation="vertical" aria-label="拖拽调整节点详情宽度" title="拖拽调整宽度" onPointerDown={startResizeInspector} />}
         <div className="inspector-header">
-          <div className="inspector-title"><FileText size={14} /> {showContent ? '节点预览' : '节点详情'}</div>
-          {savedNode && <button className="inspector-copy" data-testid="view-node-materials" onClick={()=>locateProse('materials')}><FileText size={13}/>查看材料</button>}
-          {savedNode && <button className="icon-button" disabled={copyBusy} aria-label="复制当前节点引用" title="复制当前节点引用"
-            onClick={() => void copyReference([{ type: 'node', id: savedNode.id, label: savedNode.title }], null)}><Copy size={14} /></button>}
-          <button className="icon-button" aria-label="关闭节点详情" onClick={() => setInspectorOpen(false)}><X size={16} /></button>
+          <div className="inspector-title"><FileText size={14} /> 节点详情</div>
+          <div className="inspector-header-actions">
+            {savedNode && <button className="inspector-action-btn is-primary" disabled={copyBusy} data-testid="inspector-copy-agent" title="复制节点引用到剪贴板，在对话里让 Agent 修改"
+              onClick={() => void copyReference(selectedRelationId && agentTarget ? [agentTarget] : [{ type: 'node', id: savedNode.id, label: savedNode.title }], null)}><Copy size={13}/>交给 Agent</button>}
+            {savedNode && <button className="inspector-action-btn" data-testid="view-node-materials" title="切换到节点内容补充或修订材料" onClick={() => locateProse('materials')}><FileText size={13}/>补充材料</button>}
+            <button className="icon-button" aria-label="关闭节点详情" onClick={() => { setEditingNodeId(null); setInspectorOpen(false); }}><X size={16} /></button>
+          </div>
         </div>
         {currentNode && draft ? <>
           <div className="inspector-overview">
-            <div className="inspector-heading">
-              <label className="field-title" htmlFor="node-title">图上名称</label>
-              <CompactTextarea id="node-title" data-testid="node-title" className="node-name-input" value={savedNode?.title || currentNode.title} readOnly />
+            <div className="inspector-title-row">
+              {editingCopy ? (
+                <CompactTextarea id="node-title" data-testid="node-title-input" aria-label="节点标题" className="node-name-input is-editing" value={draft.title} autoFocus onChange={event => updateDraft(currentNode.id, next => { next.title = event.target.value; })} />
+              ) : (
+                <>
+                  <h2 className="inspector-node-title" data-testid="node-title" onDoubleClick={startCopyEdit} title="双击可快速修改文案">{savedNode?.title || currentNode.title}</h2>
+                  <button type="button" className="icon-button inspector-edit-btn" data-testid="edit-copy" aria-label="快速改文案" title="快速修改文案（保留结构与材料）" onClick={startCopyEdit}><Pencil size={14} /></button>
+                </>
+              )}
             </div>
-            <div className="node-context"><span className="inspector-group group-badge" style={groupStyle(state.model.groups.findIndex(g => g.id === currentNode.groupId))}>{String(state.model.groups.findIndex(g => g.id === currentNode.groupId) + 1).padStart(2, '0')} · {state.model.groups.find(g => g.id === currentNode.groupId)?.title}</span>{scope.contextIds.has(currentNode.id) ? <button className="jump-group" onClick={() => focusNode(currentNode.id, true)} data-testid="jump-to-group">组外 · 转到所属组 <ArrowRight size={12} /></button> : <span className="node-context-id" title={currentNode.id}>{currentNode.id}</span>}</div>
-
+            <div className="inspector-meta-row">
+              <span className="inspector-group group-badge" style={groupStyle(state.model.groups.findIndex(g => g.id === currentNode.groupId))}>{String(state.model.groups.findIndex(g => g.id === currentNode.groupId) + 1).padStart(2, '0')} · {selectedGroup?.title}</span>
+              {scope.contextIds.has(currentNode.id) && <button className="jump-group" onClick={() => focusNode(currentNode.id, true)} data-testid="jump-to-group">转到所属组 <ArrowRight size={11} /></button>}
+              {!editingCopy && metaTags.filter(tag => !tag.isLong).map(tag => (
+                <span className="inspector-tag" key={tag.label} data-claim-id={tag.ids[0]} title={`${tag.label}：${tag.text}`}>
+                  <em>{tag.label}</em>{tag.text}
+                </span>
+              ))}
+            </div>
+            {!editingCopy && metaTags.filter(tag => tag.isLong).map(tag => (
+              <p className="inspector-meta-note" key={tag.label} data-claim-id={tag.ids[0]} title={tag.text} onDoubleClick={startCopyEdit}>
+                <strong>{tag.label}：</strong>{tag.text}
+              </p>
+            ))}
+            {editingCopy && metaTags.length > 0 && <div className="inspector-meta-edit">
+              {metaTags.map(tag => (
+                <div className="meta-edit-row" key={tag.label}>
+                  <span>{tag.label}</span>
+                  <div className="meta-edit-fields">{tag.ids.map((claimId, idx) => renderEditableClaim(claimId, `${tag.label} ${idx + 1}`))}</div>
+                </div>
+              ))}
+            </div>}
+            {selectedGroup?.sourceStage && <small className="source-stage-location">{selectedGroup.sourceStage} · {selectedGroup.stageLocation}</small>}
+            {editingCopy && <div className="copy-edit-bar" data-testid="copy-edit-bar">
+              <span className="copy-edit-hint">{error ? <strong className="copy-edit-error">{error}</strong> : '仅微调文字表达 · 保留连线与材料'}</span>
+              <div className="copy-edit-actions">
+                {error && <button type="button" className="quiet-button compact-btn" onClick={rebaseDraft}>基于新版核对</button>}
+                <button type="button" className="quiet-button compact-btn" data-testid="cancel-copy" disabled={saving} onClick={cancelCopyEdit}>取消</button>
+                <button type="button" className="primary-button compact-btn" data-testid="save-copy" disabled={saving || !hasTextChanges} onClick={() => void saveNode()}>{saving ? <LoaderCircle size={12} className="spin" /> : <Check size={13} />}保存文案</button>
+              </div>
+            </div>}
           </div>
           <div className="inspector-scroll" onMouseUp={captureText} onSelect={captureText}>
-            {showContent ? <section className="node-compact-preview" data-testid="node-preview">
-              <p className="preview-role">{(savedNode?.fields.role||[]).map(id=>state.model.claims.find(c=>c.id===id)?.text).filter(Boolean).join('、')||'执行者未说明'}</p>
-              {(savedNode?.fields.actions||[]).length ? <ol className="preview-actions">{savedNode!.fields.actions.map(id=><li key={id} data-claim-id={id}>{state.model.claims.find(claim=>claim.id===id)?.text}</li>)}</ol> : <p className="unknown-text">资料未说明操作。</p>}
-              <button className="quiet-button" onClick={()=>locateProse('actions')}>查看完整正文</button>
-              <h3>后续与关联</h3>{branchRows.length?branchRows.map(branch=><button className="preview-path" key={branch.id} onClick={()=>locateProse('relations')}><span>{branch.conditions.map(c=>c.text).join('；')||relationLabels[outgoing.get(branch.id)?.type||'sequence']} → {state.model.nodes.find(n=>n.id===branch.to)?.title}</span></button>):<p className="unknown-text">当前没有已知后续关系。</p>}
-              {!!selectedIssues.length&&<><h3>待确认 · {selectedIssues.length}</h3>{selectedIssues.map(issue=><button className="preview-issue" key={issue.id} onClick={()=>locateProse('issues')}>{issue.question}</button>)}</>}
-              <button className="quiet-button" onClick={()=>locateProse('rules')}>查看规则与例外</button>
-            </section> : <>
-            {manualNodeIds.includes(currentNode.id) && <div className="manual-position"><Pin size={12} /><span>此图中已手动定位，整理时会重置</span><button data-testid="release-node-position" disabled={!!layoutOperation || movingCount > 0} onClick={() => void runLayout('release')}><PinOff size={12} />解除固定</button></div>}
-            {incoming.length > 0 && <div className="incoming-summary"><span>来自</span>{incoming.map(r => <button key={r.id} onClick={() => focusNode(r.from, !visibleIds.has(r.from))}>{state.model.nodes.find(n => n.id === r.from)?.title}<ArrowDownRight size={11} /></button>)}</div>}
-            <section className="editor-section">
-              <div className="section-title"><h2 ref={actionsHeading} tabIndex={-1} className="inspector-actions-heading">操作说明</h2></div>
-              {displayFields.actions?.length ? <ol className="inspector-actions" role="list">
-                {displayFields.actions.map((claimId, index) => <li key={claimId}>
-                  <label className="claim-editor" data-claim-id={claimId}>
-                    <span className="action-index" aria-hidden="true">{index + 1}.</span>
-                    <CompactTextarea readOnly aria-label={`操作说明 ${index + 1}`} data-testid={`claim-${claimId}`} value={readingDraft?.claims.find(c => c.id === claimId)?.text || ''} onChange={event => updateDraft(currentNode.id, next => { const claim = next.claims.find(c => c.id === claimId); if (claim) claim.text = event.target.value; })} />
-                  </label>
+            {manualNodeIds.includes(currentNode.id) && <div className="manual-position"><Pin size={12} /><span>此节点位置已固定</span><button data-testid="release-node-position" disabled={!!layoutOperation || movingCount > 0} onClick={() => void runLayout('release')}><PinOff size={12} />解除固定</button></div>}
+
+            {(distinctTriggerIds.length > 0 || distinctInputIds.length > 0) && <section className="inspector-kv-block">
+              {distinctTriggerIds.length > 0 && <div className="inspector-kv-row">
+                <span className="inspector-kv-label">触发</span>
+                <div className="inspector-kv-value">{editingCopy ? distinctTriggerIds.map((id, idx) => renderEditableClaim(id, `触发条件 ${idx + 1}`)) : distinctTriggerIds.map(id => <p key={id} data-claim-id={id} onDoubleClick={startCopyEdit}>{claimValue(id)}</p>)}</div>
+              </div>}
+              {distinctInputIds.length > 0 && <div className="inspector-kv-row">
+                <span className="inspector-kv-label">输入</span>
+                <div className="inspector-kv-value">{editingCopy ? distinctInputIds.map((id, idx) => renderEditableClaim(id, `输入资料 ${idx + 1}`)) : distinctInputIds.map(id => <p key={id} data-claim-id={id} onDoubleClick={startCopyEdit}>{claimValue(id)}</p>)}</div>
+              </div>}
+            </section>}
+
+            <section className="inspector-section">
+              <div className="section-title"><h3 ref={actionsHeading} tabIndex={-1} className="inspector-actions-heading">操作说明</h3></div>
+              {actionIds.length ? <ol className="inspector-read-list" role="list">
+                {actionIds.map((claimId, index) => <li key={claimId}>
+                  <span className="action-index" aria-hidden="true">{index + 1}.</span>
+                  {editingCopy ? renderEditableClaim(claimId, `操作说明 ${index + 1}`, `claim-${claimId}`) : <p className="read-claim-text" data-claim-id={claimId} data-testid={`claim-${claimId}`} onDoubleClick={startCopyEdit}>{claimValue(claimId)}</p>}
                 </li>)}
-              </ol> : <p className="empty-hint">原文尚未说明动作。</p>}
+              </ol> : <p className="empty-hint">原文尚未说明具体操作。</p>}
+              {(distinctOutputIds.length > 0 || supplementalClaims.length > 0) && <div className="inspector-kv-block is-after">
+                {distinctOutputIds.length > 0 && <div className="inspector-kv-row">
+                  <span className="inspector-kv-label">产出</span>
+                  <div className="inspector-kv-value">{editingCopy ? distinctOutputIds.map((id, idx) => renderEditableClaim(id, `完成结果 ${idx + 1}`)) : distinctOutputIds.map(id => <p key={id} data-claim-id={id} onDoubleClick={startCopyEdit}>{claimValue(id)}</p>)}</div>
+                </div>}
+                {supplementalClaims.length > 0 && <div className="inspector-kv-row">
+                  <span className="inspector-kv-label">补充</span>
+                  <div className="inspector-kv-value">{editingCopy ? supplementalClaims.map((claim, idx) => renderEditableClaim(claim.id, `补充说明 ${idx + 1}`)) : supplementalClaims.map(claim => <p key={claim.id} data-claim-id={claim.id} onDoubleClick={startCopyEdit}>{claimValue(claim.id)}</p>)}</div>
+                </div>}
+              </div>}
             </section>
-            <section className="editor-section" data-testid="node-details" key={`details-${currentNode.id}`}>
-              <details className="full-details" open={expandedDetailsId === currentNode.id} onToggle={event => { const open = event.currentTarget.open; setExpandedDetailsId(previous => open ? currentNode.id : previous === currentNode.id ? null : previous); }}><summary>细节与补充<ChevronDown size={13} /></summary>
 
-                {detailFields.map(field => <div className="detail-field" key={field} data-field={field}><h3>{fieldLabels[field] || field}</h3>{displayFields[field].length ? displayFields[field].map((claimId, index) => <CompactTextarea readOnly key={claimId} data-claim-id={claimId} aria-label={`${fieldLabels[field] || field} ${index + 1}`} value={readingDraft?.claims.find(c => c.id === claimId)?.text || ''} onChange={e => updateDraft(currentNode.id, d => { const c = d.claims.find(c => c.id === claimId); if (c) c.text = e.target.value; })} />) : <p className="unknown-text">资料未说明</p>}</div>)}
-                {supplementalClaims.length > 0 && <div className="detail-field"><h3>补充说明</h3>{supplementalClaims.map((claim, index) => <CompactTextarea key={claim.id} data-claim-id={claim.id} aria-label={`补充说明 ${index + 1}`} readOnly value={claim.text} onChange={e => updateDraft(currentNode.id, d => { const c = d.claims.find(c => c.id === claim.id); if (c) c.text = e.target.value; })} />)}</div>}
-                {!detailFields.length && !supplementalClaims.length && <p className="empty-hint">暂无细节与补充。</p>}
-              </details>
-            </section>
-            <section className="editor-section paths-section">
-              <div className="section-title"><h2>完成后走向 <span className="count-badge">{outgoing.size}</span></h2></div>
-              {branchRows.length ? branchRows.map((branch, index) => {
-                const relation = outgoing.get(branch.id);
-                const destination = state.model.nodes.find(node => node.id === relation?.to);
-                const label = relation && destination ? `${currentNode.title} → ${destination.title}` : undefined;
-                const relationType = relation?.type || draft.branchTypes?.[branch.id] || 'sequence';
-                const isSelected = selection.some(item => item.type === 'relation' && item.id === branch.id);
-                return <div className={`branch-editor ${isSelected ? 'highlighted' : ''}`} key={branch.id} data-branch-id={branch.id}>
-                  <div className="branch-heading"><span className="path-dot" /><span title={relationLabels[relationType]}>{index + 1}</span><small>{relationLabels[relationType]}</small></div>
-                  {relation && label && <button className="branch-selector" data-testid={`select-relation-${branch.id}`}
-                    aria-label={`选择连线 ${label}（${relationLabels[relationType] || relationType}）`} aria-pressed={isSelected}
-                    onClick={() => {
-                      if (selectedRelationId === relation.id && savedNode) setSelection([{ type: 'node', id: savedNode.id, label: savedNode.title }]);
-                      else focusRelation(relation.id, false);
-                    }}>
-                    <span>{label}</span><small>{isSelected ? '已选中' : relationLabels[relationType] || relationType}</small>
-                  </button>}
-                  {branch.conditions.length ? branch.conditions.map((condition, conditionIndex) => <label className="branch-condition" key={condition.id} data-claim-id={condition.id}>
-                    <span>条件</span>
-                    <CompactTextarea readOnly aria-label={`路径 ${index + 1} 条件 ${conditionIndex + 1}`} data-testid={`condition-${condition.id}`} value={state.model.claims.find(c => c.id === condition.id)?.text || condition.text} onChange={event => updateDraft(currentNode.id, next => {
-                      const item = next.branches.find(entry => entry.id === branch.id)?.conditions.find(entry => entry.id === condition.id);
-                      if (item) item.text = event.target.value;
-                    })} />
-                  </label>) : <p className="unconditional">{relationType === 'sequence' ? '完成本步骤后' : `${relationLabels[relationType]}关系，未单列条件`}</p>}
-                  <div className="branch-destination">
-                    <ArrowRight size={13} /><span>前往</span>
-                    {destination ? <button className="branch-target" data-testid={`destination-${branch.id}`} onClick={() => focusNode(destination.id, !visibleIds.has(destination.id))}>{destination.title}</button>
-                      : <span className="branch-target">连线已从此节点移除</span>}
-                  </div>
-                </div>;
-              }) : <p className="empty-hint">当前没有已知后续关系。</p>}
-            </section>
-            {selectedIssues.length > 0 && <section className="issues-section"><h2><AlertCircle size={14} /> 这里还有待确认</h2>{selectedIssues.map(issue => <button key={issue.id} onClick={() => void copyReference([{ type: 'issue', id: issue.id, label: issue.question }], null)} title="复制此疑点引用"><span>{issue.question}</span><Copy size={13} /></button>)}</section>}
-            </>}
-            {(legacyInputs[currentNode.id]||[]).length>0&&<p className="reader-draft-hint">有以前保留的未采用输入 <button onClick={()=>locateProse('materials')}>到节点材料中查看</button></p>}
-            <section className="source-locations" data-testid="source-locations" aria-label="来源位置"><h2><FileText size={13} /> 来源位置</h2>
-              {sourceLocations.map(location => <div className="source-location" key={location.key}>
-                <span>{location.label}</span><span className={`origin-badge ${location.origin}`}>{originLabels[location.origin] || location.origin}</span>
+            {hasRulesBlock && <section className="inspector-callout inspector-callout-rules" data-testid="node-rules">
+              <div className="callout-title">规则与限制</div>
+              {nodeRuleIds.length > 0 && <div className="callout-body">
+                {nodeRuleIds.map((claimId, index) => editingCopy
+                  ? renderEditableClaim(claimId, `规则与限制 ${index + 1}`, `rule-${claimId}`)
+                  : <p key={claimId} data-claim-id={claimId} onDoubleClick={startCopyEdit}>{claimValue(claimId)}</p>)}
+              </div>}
+              {extraLinkedRules.map(rule => <div className="linked-rule-item" key={rule.id}>
+                <strong>{rule.title}</strong>
+                {rule.extraClaimIds.map(id => <p key={id} data-claim-id={id}>{state.model.claims.find(c => c.id === id)?.text}</p>)}
               </div>)}
+            </section>}
+
+            <section className="inspector-section paths-section">
+              <div className="section-title">
+                <h3>后续走向 <span className="count-badge">{outgoing.size}</span></h3>
+                {outgoing.size > 1 && <button className="quiet-button compact-btn" onClick={() => setCompareNodeId(currentNode.id)}>横向对照</button>}
+              </div>
+              {branchRows.length ? <div className="exit-rows">
+                {branchRows.map((branch, index) => {
+                  const relation = outgoing.get(branch.id);
+                  const destination = state.model.nodes.find(node => node.id === relation?.to);
+                  const label = relation && destination ? `${currentNode.title} → ${destination.title}` : undefined;
+                  const relationType = relation?.type || draft.branchTypes?.[branch.id] || 'sequence';
+                  const isSelected = selection.some(item => item.type === 'relation' && item.id === branch.id);
+                  const draftBranch = draft.branches.find(item => item.id === branch.id);
+                  return <div className={`exit-row ${isSelected ? 'highlighted' : ''}`} key={branch.id} data-branch-id={branch.id}>
+                    <div className="exit-row-head">
+                      {relation && label && <button type="button" className="exit-select-btn" data-testid={`select-relation-${branch.id}`}
+                        aria-label={`选择连线 ${label}（${relationLabels[relationType] || relationType}）`} aria-pressed={isSelected}
+                        title="选中此连线以查看依据或复制连线引用"
+                        onClick={() => {
+                          if (selectedRelationId === relation.id && savedNode) setSelection([{ type: 'node', id: savedNode.id, label: savedNode.title }]);
+                          else focusRelation(relation.id, false);
+                        }}>
+                        <span className="exit-code">{exits.get(branch.id)?.code}</span>
+                        {relationType !== 'sequence' && <small className="exit-type">{relationLabels[relationType]}</small>}
+                      </button>}
+                      <ArrowRight size={12} className="exit-arrow" />
+                      {destination ? <button type="button" className="exit-dest-btn" data-testid={`destination-${branch.id}`} onClick={() => focusNode(destination.id, !visibleIds.has(destination.id))}>{destination.title}</button>
+                        : <span className="exit-dest-btn">连线已移除</span>}
+                    </div>
+                    {branch.conditions.length > 0 ? <div className="exit-row-conditions">
+                      {branch.conditions.map((condition, conditionIndex) => editingCopy ? (
+                        <CompactTextarea key={condition.id} aria-label={`路径 ${index + 1} 条件 ${conditionIndex + 1}`} data-testid={`condition-${condition.id}`}
+                          value={draftBranch?.conditions.find(c => c.id === condition.id)?.text ?? condition.text}
+                          onChange={event => updateDraft(currentNode.id, next => {
+                            const item = next.branches.find(entry => entry.id === branch.id)?.conditions.find(entry => entry.id === condition.id);
+                            if (item) item.text = event.target.value;
+                          })} />
+                      ) : (
+                        <p key={condition.id} data-claim-id={condition.id} data-testid={`condition-${condition.id}`} onDoubleClick={startCopyEdit}>{state.model.claims.find(c => c.id === condition.id)?.text || condition.text}</p>
+                      ))}
+                    </div> : <p className="exit-unconditional">{relationType === 'sequence' ? '完成后直接进入' : `${relationLabels[relationType]}关系`}</p>}
+                    {isSelected && relation && <RelationEvidence model={state.model}
+                      claimIds={relation.conditionClaimIds.length ? relation.conditionClaimIds : relation.claimIds} />}
+                  </div>;
+                })}
+              </div> : <p className="empty-hint">当前没有已知后续流向。</p>}
             </section>
 
-            {chosenText && <button className="quote-selection" disabled={copyBusy} onClick={() => void copyReference([{ type: 'claim', id: chosenText.claimId, label: chosenText.text }])}><Copy size={13} /> 复制所选文字引用</button>}
+            {selectedIssues.length > 0 && <section className="inspector-callout inspector-callout-issues" data-testid="node-issues">
+              <div className="callout-title"><AlertCircle size={13} /> 待确认 · {selectedIssues.length}</div>
+              <div className="issue-items">
+                {selectedIssues.map(issue => <button key={issue.id} className="issue-item-btn" onClick={() => void copyReference([{ type: 'issue', id: issue.id, label: issue.question }], null)} title="点击复制此疑点引用交给 Agent">
+                  <span>{issue.type === 'conflict' ? '【冲突】' : ''}{issue.question}</span>
+                  <Copy size={12} />
+                </button>)}
+              </div>
+            </section>}
+
+            {(legacyInputs[currentNode.id] || []).length > 0 && <p className="reader-draft-hint">有历史未采用输入 <button onClick={() => locateProse('materials')}>到节点材料查看</button></p>}
+
+            <div className="inspector-folds">
+              {incoming.length > 0 && <details className="inspector-fold">
+                <summary><span>上游来源</span><small>{incoming.length} 个节点</small><ChevronDown size={13} /></summary>
+                <div className="incoming-summary">{incoming.map(r => <button key={r.id} onClick={() => focusNode(r.from, !visibleIds.has(r.from))}>{state.model.nodes.find(n => n.id === r.from)?.title}<ArrowDownRight size={11} /></button>)}</div>
+              </details>}
+              <details className="inspector-fold" data-testid="source-locations" aria-label="来源位置">
+                <summary><span><FileText size={12} /> 原文依据与来源位置</span><small>{sourceLocations.length} 处</small><ChevronDown size={13} /></summary>
+                <div className="source-locations-list">
+                  {sourceLocations.map(location => <div className="source-location" key={location.key}>
+                    <span>{location.label}</span><span className={`origin-badge ${location.origin}`}>{originLabels[location.origin] || location.origin}</span>
+                  </div>)}
+                </div>
+              </details>
+            </div>
+
+            {chosenText && !editingCopy && <button className="quote-selection" disabled={copyBusy} onClick={() => void copyReference([{ type: 'claim', id: chosenText.claimId, label: chosenText.text }])}><Copy size={13} /> 复制所选文字引用</button>}
           </div>
 
-        </> : <div className="empty-inspector"><Waypoints size={30} /><h2>选中一个节点</h2><p>选择节点或连线可查看对应内容。</p><button className="secondary-button" disabled={copyBusy} onClick={() => void copyReference([], null)}><Copy size={14} /> 复制完整流程引用</button></div>}
+        </> : <div className="empty-inspector"><Waypoints size={30} /><h2>点击画布上的节点</h2><p>选择节点或连线，在这里快速阅读整理摘要、微调文案或复制引用给 Agent。</p><button className="secondary-button" disabled={copyBusy} onClick={() => void copyReference([], null)}><Copy size={14} /> 复制完整流程引用</button></div>}
 
       </aside>}
     </div>
 
+    {compareNodeId && state.model.nodes.some(n => n.id === compareNodeId) && <ExitComparison nodeId={compareNodeId} model={state.model} exits={exits} onClose={() => setCompareNodeId(null)} />}
+    {compareDataExits && state.model.nodes.some(n=>n.id===compareDataExits.source) && <ExitComparison nodeId={compareDataExits.source} relationIds={compareDataExits.ids} model={state.model} exits={exits} onClose={()=>setCompareDataExits(null)}/>}
     {agentTask && <AgentTaskPreview task={agentTask.task} revision={agentTask.workRevision} targets={agentTask.processingTargets}
       materials={agentTask.referenceTargets} quote={agentTask.quote} draft={agentTask.draft} includeDraft={agentTask.includeDraft}
       busy={copyBusy} stale={agentTaskStale} hasMissingTargets={agentTaskMissingTargets} error={agentTaskError} fallback={agentTaskStale ? '' : agentTaskFallback}

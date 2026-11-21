@@ -2,7 +2,7 @@ import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } f
 import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, Handle, Position, useUpdateNodeInternals, type EdgeProps } from '@xyflow/react';
 import { routeSmartEdgeBatch, svgDrawSmoothStepLinePath, type SmartEdgeBatchItem } from '@tisoap/react-flow-smart-edge';
 import { portPoint, type LayoutDirection, type LayoutEdge, type LayoutNode, type RelationPort, type RelationPorts } from './graph-layout.mjs';
-import { alignRouteToHandles, CROSSING_GAP_RADIUS, findCrossingGaps, resolveUnobstructedSmartRoute, separateSharedRoute } from './graph-smart-route.mjs';
+import { alignRouteToHandles, CROSSING_GAP_RADIUS, findCrossingGaps, reduceBranchCrossings, resolveUnobstructedSmartRoute, separateSharedRoute } from './graph-smart-route.mjs';
 
 export type Point = { x: number; y: number };
 export type EdgeRoute = { points: Point[]; label?: Point & { width: number; height: number }; geometryKey: string };
@@ -10,7 +10,7 @@ export type ScopedLayout = { revision: number; inputKey?: string; needsMeasureme
 type Box = Point & { id: string; width: number; height: number };
 type CrossingMask = { gaps: Point[]; bounds: Point & { width: number; height: number } };
 type RoutedDrawing = { points: Point[]; labelCenter: Point; mode: 'elk' | 'smart'; shifted: boolean; obstacles: readonly Box[]; crossings?: CrossingMask };
-type RouteData = { kind: string; highlighted: boolean; label: string; labelWidth: number; labelHeight: number; drawing?: RoutedDrawing | null };
+type RouteData = { accessibleName?: string; kind: string; highlighted: boolean; tail?: Point[]; label: string; labelWidth: number; labelHeight: number; openRelation: (id: string) => void; drawing?: RoutedDrawing | null };
 
 const handlePositions = {
   DOWN: { top: Position.Top, bottom: Position.Bottom, left: Position.Left },
@@ -33,7 +33,7 @@ export function ProcessHandles({ nodeId, direction, ports = noPorts }: { nodeId:
 
 // The same measured label box is sent to ELK and used by the renderer.
 let measureContext: CanvasRenderingContext2D | null = null;
-export function measureEdgeLabel(text: string) {
+function measureEdgeLabel(text: string) {
   if (!text) return { labelWidth: 0, labelHeight: 0 };
   measureContext ||= document.createElement('canvas').getContext('2d');
   if (measureContext) measureContext.font = '500 11px system-ui, sans-serif';
@@ -44,6 +44,16 @@ export function measureEdgeLabel(text: string) {
     else width += size;
   }
   return { labelWidth: Math.ceil(Math.min(210, Math.max(36, widest, width) + 16)), labelHeight: Math.ceil(lines * 16 + 8) };
+}
+
+// Keep the whole predicate or use a neutral link. A clipped predicate may lose
+// its negation or exception. The layout and the button share this same box.
+export function edgeLabelBox(text: string, fallback = '查看完整条件') {
+  const compact = text.trim().replace(/\s+/gu, ' ');
+  const size = compact.length <= 100 ? measureEdgeLabel(compact) : null;
+  if (size && size.labelHeight <= 40) return { label: compact, ...size };
+  const label = fallback;
+  return { label, ...measureEdgeLabel(label) };
 }
 
 function centerOnFreeSegment(points: Point[], width: number, height: number, obstacles: Box[], fallback: Point): Point {
@@ -108,8 +118,23 @@ function buildDrawings(nodes: LayoutNode[], edges: LayoutEdge[], direction: Layo
   }
   const routed = orderedEdges.flatMap(edge => {
     const drawing = drawings.get(edge.id);
-    return drawing ? [{ id: edge.id, type: edge.type, points: drawing.points }] : [];
+    return drawing ? [{ id: edge.id, from: edge.from, to: edge.to, type: edge.type, points: drawing.points }] : [];
   });
+  const improved = reduceBranchCrossings(routed, nodes, direction);
+  for (const route of routed) {
+    const points = improved.get(route.id);
+    if (!points) continue;
+    const drawing = drawings.get(route.id)!, edge = edgeById.get(route.id)!;
+    drawing.points = route.points = points;
+    drawing.shifted = true;
+    if (!edge.label) continue;
+    const width = edge.labelWidth || 0, height = edge.labelHeight || 0;
+    const obstacle = labelObstacles.slice(nodes.length).find(o => o.id === edge.id);
+    const a = points[points.length - 2], b = points[points.length - 1];
+    drawing.labelCenter = centerOnFreeSegment(points, width, height, labelObstacles.filter(o => o !== obstacle),
+      { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    if (obstacle) Object.assign(obstacle, { x: drawing.labelCenter.x - width / 2, y: drawing.labelCenter.y - height / 2 });
+  }
   for (const [id, gaps] of findCrossingGaps(routed, direction, labelObstacles)) {
     const drawing = drawings.get(id)!;
     const xs = drawing.points.map(point => point.x), ys = drawing.points.map(point => point.y);
@@ -129,8 +154,8 @@ export function useProcessRoutes(nodes: LayoutNode[], edges: LayoutEdge[], direc
       const { points, label } = savedRoutes![id];
       return [id, points.map(({ x, y }) => [x, y]), label && [label.x, label.y, label.width, label.height]];
     });
-    return JSON.stringify([geometryKey, routes]);
-  }, [geometryKey, savedRoutes]);
+    return JSON.stringify([geometryKey, edges.map(edge=>edge.id), routes]);
+  }, [geometryKey, savedRoutes, edges]);
   const [snapshot, setSnapshot] = useState<{ key: string; drawings: ReturnType<typeof buildDrawings> }>();
   const inputs = useRef<{ key: string; args: Parameters<typeof buildDrawings> }>({ key: drawingKey, args: [nodes, edges, direction, ports, geometryKey, savedRoutes] });
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -166,12 +191,22 @@ function EdgeDrawing({ props, path, labelCenter, mode, crossings }: { props: Edg
       </mask></defs>}
       <BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} interactionWidth={10} mask={crossings ? `url(#${maskId})` : undefined} style={{ stroke: processEdgeColor(data.kind, highlighted), strokeWidth: highlighted ? 2.4 : 1.6, strokeDasharray: isReturn || ['data', 'association'].includes(data.kind) ? '5 5' : undefined, opacity: mode === 'pending' ? .45 : 1 }} />
     </g>
-    {data.label && <EdgeLabelRenderer><div data-edge-label={props.id} className={`edge-label nodrag nopan ${highlighted ? 'selected' : ''} ${isReturn ? 'return-label' : ''}`} style={{ transform: `translate(-50%, -50%) translate(${labelCenter.x}px, ${labelCenter.y}px)`, width: data.labelWidth, minHeight: data.labelHeight }} title={mode === 'fallback' ? `${data.label}（路径空间不足，可移动节点后重试）` : data.label}>{data.label}</div></EdgeLabelRenderer>}
+    {data.label && <EdgeLabelRenderer>
+      <button type="button" data-edge-label={props.id} className={`edge-label nodrag nopan ${highlighted ? 'selected' : ''} ${isReturn ? 'return-label' : ''}`}
+        style={{ transform: `translate(-50%, -50%) translate(${labelCenter.x}px, ${labelCenter.y}px)`, width: data.labelWidth, minHeight: data.labelHeight }}
+        aria-label={data.accessibleName} title={data.accessibleName || "查看连线详情"} onClick={event => { event.stopPropagation(); data.openRelation(props.id); }}>
+        {data.label}
+      </button>
+    </EdgeLabelRenderer>}
   </>;
 }
 
 export function ProcessEdge(props: EdgeProps) {
   const data = props.data as RouteData;
+  if (data.tail) {
+    const [start,end] = data.tail;
+    return <EdgeDrawing props={props} path={`M ${start.x} ${start.y} L ${props.targetX} ${props.targetY}`} labelCenter={end} mode="shared"/>;
+  }
   const drawing = data.drawing;
   const first = drawing?.points[0], last = drawing?.points.at(-1);
   // Snap the card-boundary endpoints to React Flow's measured outer handle edges.

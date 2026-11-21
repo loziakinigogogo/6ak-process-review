@@ -70,7 +70,7 @@ async function main() {
     positions: Object.fromEntries(Object.entries(seed.view.positions).filter(([id]) => visible.has(id))), routes: {} } });
   // These deliberately obstructed coordinates are a manual routing fixture.
   // Automatic content-layout migration must preserve them while we test the
-  // fallback obstacle router; the explicit Arrange below still releases them.
+  // fallback obstacle router. Reset them before checking a fresh ELK layout.
   app.store.updateView({ layout: { scopeId: 'execute', action: 'move', baseRevision: 1,
     positions: Object.fromEntries(Object.entries(seed.view.positions).filter(([id]) => visible.has(id))) } });
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : undefined);
@@ -104,8 +104,7 @@ async function main() {
     await page.waitForTimeout(450); // The control animates its viewport for 300 ms.
   };
   const resumeMaterial = async () => {
-    await page.getByTestId('view-graph').click();
-    await page.getByTestId('organize-node').click();
+    await page.getByTestId('view-content').click();
     await page.locator('[data-content-node-id="validate"]').getByTestId('add-content-note').click();
     return page.getByLabel('补充原话',{exact:true});
   };
@@ -117,7 +116,8 @@ async function main() {
     await button.click();
     await expect.poll(async () => scoped(await state(), scopeId)?.revision || 0, { timeout: 30000 }).toBeGreaterThan(before);
     await expect(page.getByTestId('arrange-layout')).toBeEnabled({ timeout: 30000 });
-    assert.ok(layoutRequests.slice(requestCount).some(layout => layout.action === 'reset' && layout.scopeId === scopeId));
+    const expectedAction = control === 'reset-layout' ? 'reset' : 'arrange';
+    assert.ok(layoutRequests.slice(requestCount).some(layout => layout.action === expectedAction && layout.scopeId === scopeId));
     await fit();
     return state();
   };
@@ -188,7 +188,8 @@ async function main() {
     await expect.poll(() => Object.values(app.store.buffers('content-editor')).some(buffer => buffer.draft?.text === draftTitle)).toBe(true);
     await page.getByTestId('view-graph').click();
     const beforeArrange = await state();
-    const arranged = await arrange();
+    const arranged = await automaticLayout('reset-layout');
+    assert.deepEqual(scoped(arranged).manualNodeIds, []);
     assert.ok(Object.keys(scoped(arranged).positions).length > 0);
     assert.ok(Object.keys(scoped(arranged).routes || {}).length > 0, 'ELK arrangement must save at least one routed edge');
     assert.notDeepEqual(scoped(arranged).positions, baseline);
@@ -203,11 +204,11 @@ async function main() {
     const manualPosition = await drag('manual');
     const beforePinnedArrange = await state();
     const arrangedWithManual = await arrange();
-    assert.notDeepEqual(scoped(arrangedWithManual).positions.manual, manualPosition, 'arrange must recompute the user position');
-    assert.deepEqual(scoped(arrangedWithManual).manualNodeIds, []);
-    await expect(page.getByTestId('graph-node-manual')).toHaveAttribute('data-manual', 'false');
+    assert.deepEqual(scoped(arrangedWithManual).positions.manual, manualPosition, 'arrange preserves the pinned position');
+    assert.deepEqual(scoped(arrangedWithManual).manualNodeIds, scoped(beforePinnedArrange).manualNodeIds);
+    await expect(page.getByTestId('graph-node-manual')).toHaveAttribute('data-manual', 'true');
     await routesClear('after rearranging a manually placed node');
-    check('manually placing a node saves its position and arranging again resets it');
+    check('manually placing a node saves its position and arranging again preserves its pin');
 
     const laterMove = await drag('import', 'execute', -35, 38);
     const undone = await undoLayout();
@@ -250,7 +251,7 @@ async function main() {
     let heldLayout;
     await page.route('**/api/workbench/view', async route => {
       const body = route.request().postDataJSON();
-      if (body?.layout?.action === 'reset') { heldLayout = body.layout; markArrived(); await held; }
+      if (body?.layout?.action === 'arrange') { heldLayout = body.layout; markArrived(); await held; }
       await route.continue();
     });
     try {
@@ -268,7 +269,8 @@ async function main() {
     check('an in-flight arrangement cannot write positions into the group opened afterward');
 
     await switchGroup('execute');
-    await expect(page.getByTestId('graph-node-import')).toHaveAttribute('data-manual', 'false');
+    await expect(page.getByTestId('graph-node-import')).toHaveAttribute('data-manual', 'true');
+    assert.deepEqual(scoped(await state()).positions.import, laterMove);
     // Keep the endpoint of manual -> validate exposed: dragging import down
     // and left would physically cover that handle, making a clear route impossible.
     await drag('import', 'execute', 35, 0);

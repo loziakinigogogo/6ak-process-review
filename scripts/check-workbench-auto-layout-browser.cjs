@@ -163,7 +163,8 @@ async function main() {
     await page.getByTestId('arrange-layout').click();
     await expect.poll(async () => layout(await state()).revision).toBeGreaterThan(afterPinned.revision);
     const arranged = await settled();
-    assert.deepEqual(arranged.manualNodeIds, []);
+    assert.deepEqual(arranged.manualNodeIds, afterPinned.manualNodeIds);
+    assert.deepEqual(arranged.positions.manual, pin);
     assert.ok(arranged.previous);
     const undoSnapshot = structuredClone(arranged.previous);
     await editTitle('核验调价');

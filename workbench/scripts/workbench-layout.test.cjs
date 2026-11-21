@@ -9,6 +9,33 @@ const overlaps = (a, b) => a.x < b.x + b.width - 0.001 && a.x + a.width > b.x + 
   && a.y < b.y + b.height - 0.001 && a.y + a.height > b.y + 0.001;
 
 function finalNodes(input, result) { return input.nodes.map(n => ({ ...n, ...result.positions[n.id] })); }
+
+test('geometry orders fan ports after a drag; repeated exits share the stable exit-order tie break', async () => {
+  const { relationPorts } = await layoutModule;
+  const edges = [edge('a', 'hub', 'one', { toOrder: 1 }), edge('c', 'hub', 'two', { toOrder: 2, exitOrder: 2 }),
+    edge('b', 'hub', 'two', { toOrder: 2, exitOrder: 1 })];
+  const nodes = [node('hub'), node('one', 500, 700), node('two', 500, 250)];
+  const fractions = () => [...relationPorts(edges, nodes, 'RIGHT').byEdge].sort((a,b) => a[1].source.fraction - b[1].source.fraction).map(([id]) => id);
+  assert.deepEqual(fractions(), ['b', 'c', 'a']);
+  nodes[1].y = 50;
+  assert.deepEqual(fractions(), ['a', 'b', 'c']);
+});
+
+test('scoped placement keeps a fixed main step and the real arrow of an outside review return', async () => {
+  const { arrangeGraph } = await layoutModule;
+  const { scopeLayoutEdges } = await import('../frontend/src/graph-layout-input.mjs');
+  const nodes = [node('step', 480, 280), node('request'), node('record'), node('review')];
+  const edges = [edge('issue', 'request', 'step'), edge('submit', 'step', 'record'), edge('handoff', 'record', 'review'),
+    edge('data', 'record', 'request', { type: 'data' }), edge('retry', 'review', 'step', { type: 'return' })];
+  const scoped = scopeLayoutEdges(edges, new Set(['request', 'record', 'review']));
+  assert.deepEqual(scoped.map(e => e.layoutRole), [undefined, undefined, undefined, 'context', 'feedback']);
+  const result = await arrangeGraph({ nodes, edges: scoped, direction: 'RIGHT', manualNodeIds: ['step'] });
+  assert.deepEqual(result.positions.step, { x: 480, y: 280 });
+  assert.ok(result.positions.request.x < result.positions.step.x && result.positions.step.x < result.positions.review.x);
+  assert.equal(scoped.at(-1).from, 'review');
+  assert.equal(scoped.at(-1).to, 'step');
+  assert.deepEqual(scopeLayoutEdges(edges, new Set()), edges);
+});
 function assertNoOverlap(nodes, allowedPairs = []) {
   for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
     if (allowedPairs.some(pair => pair.includes(nodes[i].id) && pair.includes(nodes[j].id))) continue;
@@ -44,6 +71,27 @@ function assertSafeRoutes(input, result) {
     if (route.label) for (const n of nodes) assert.equal(overlaps(route.label, n), false, `label ${id} intersects ${n.id}`);
   }
 }
+
+test('terminal data siblings wrap while the continuing branch and fixed cards retain their own geometry', async () => {
+  const { arrangeGraph } = await layoutModule;
+  const leaves = Array.from({ length: 6 }, (_, index) => node('leaf-' + index, 100, 500 + 150 * index, 240, 125 + index));
+  const input = {
+    nodes: [node('source'), ...leaves, node('check'), node('follow')],
+    edges: [...leaves.map((leaf, i) => edge('input-' + i, 'source', leaf.id, { type: 'data', dataLeafGroup: 'inspection', toOrder: i })),
+      edge('decision', 'source', 'check'), edge('continue', 'check', 'follow')],
+  };
+  for (const direction of ['RIGHT', 'DOWN']) {
+    const axis = direction === 'RIGHT' ? 'x' : 'y';
+    const result = await arrangeGraph({ ...input, direction });
+    assert.equal(new Set(leaves.map(n => result.positions[n.id][axis])).size, 2);
+    assert.ok(result.positions.follow[axis] > result.positions.check[axis]);
+    assertNoOverlap(finalNodes(input, result));
+    assert.deepEqual(Object.keys(result.positions).sort(), input.nodes.map(n => n.id).sort());
+    const fixed = await arrangeGraph({ ...input, direction, manualNodeIds: [leaves[0].id] });
+    assert.deepEqual(fixed.positions[leaves[0].id], { x: leaves[0].x, y: leaves[0].y });
+    assertNoOverlap(finalNodes(input, fixed));
+  }
+});
 
 test('ELK routes a single-column shortcut around the intervening measured node', async () => {
   const { arrangeGraph } = await layoutModule;

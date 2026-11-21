@@ -1,6 +1,20 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
+test('a clear return lane avoids a forward crossing without reversing its endpoints', async () => {
+  const { reduceBranchCrossings } = await import('../frontend/src/graph-smart-route.mjs');
+  const back = [{x:330,y:180},{x:330,y:150},{x:30,y:150},{x:30,y:180}];
+  const other = [{x:150,y:140},{x:150,y:175}];
+  const input = [{id:'back', from:'b', to:'a', type:'return', points:back},
+    {id:'front', from:'c', to:'d', points:other}];
+  const nodes = [{id:'b', x:310, y:180, width:40,height:50}, {id:'a', x:10,y:180,width:40,height:50},
+    {id:'c', x:110,y:90,width:20,height:30}];
+  const improved = reduceBranchCrossings(input,nodes,'RIGHT').get('back');
+  assert.ok(improved);
+  assert.deepEqual(improved[0], back[0]); assert.deepEqual(improved.at(-1),back.at(-1));
+  assert.ok(improved[1].y < other[0].y);
+});
+
 const obstacles = [
   { id: 'platform-wait', x: 600, y: 850, width: 200, height: 183.59375 },
   { id: 'verify-front', x: 600, y: 1060, width: 200, height: 183.59375 },

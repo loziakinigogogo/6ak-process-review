@@ -107,7 +107,15 @@ async function renderedGeometry(page, relations, direction) {
       const cutsHere = cuts.filter(other => Math.hypot(cut.x - other.x, cut.y - other.y) < 1).length;
       return { ...cut, unbroken, cutsHere };
     });
-    return { boxes, collisions, endpoints, routes: routes.map(({ runs, ...route }) => route), coincident, crossings };
+    const intersections = [];
+    for (const [index, first] of routes.entries()) for (const second of routes.slice(index + 1)) {
+      for (const a of first.runs) for (const b of second.runs) {
+        if (a.axis === b.axis) continue;
+        const point = a.axis === 'x' ? { x:a.position, y:b.position } : { x:b.position, y:a.position };
+        if (runAt(a, point) && runAt(b, point)) intersections.push(point);
+      }
+    }
+    return { boxes, collisions, endpoints, routes: routes.map(({ runs, ...route }) => route), coincident, crossings, intersections };
   }, { relations, direction });
 }
 
@@ -128,7 +136,9 @@ function assertSeparateBranches(report) {
 }
 
 function assertCrossings(report) {
-  assert.ok(report.crossings.length > 0, 'the crossed routes must render visible gaps');
+  for (const p of report.intersections) {
+    assert.ok(report.crossings.some(c => Math.hypot(c.x - p.x, c.y - p.y) < 2), 'a rendered orthogonal crossing must have a visible gap');
+  }
   for (const route of report.routes) {
     assert.equal(route.crossingCount, report.crossings.filter(crossing => crossing.id === route.id).length);
   }
@@ -264,7 +274,7 @@ async function main() {
     try {
       const savedSelection = page.waitForResponse(response => isSelection(response.request()));
       await node.locator('.node-title').click();
-      await expect(page.getByTestId('node-title')).toHaveValue(title);
+      await expect(page.getByTestId('node-title')).toHaveText(title);
       await expect(node).toHaveClass(/\bis-selected\b/);
       const waitingForSave = await page.evaluate(() => window.inspectClickGeometry(false));
       release();
@@ -288,13 +298,13 @@ async function main() {
   const saveSummary = extra => fs.writeFileSync(path.join(directory, 'summary.json'), JSON.stringify({ checks, errors, requests, metrics, geometry, ...extra }, null, 2));
 
   try {
-    // Keep a portrait canvas inside a landscape window with the slimmer inspector.
-    const seed = await openTask('new-auto-task', { width: 1200, height: 1000 });
+    // Keep a portrait canvas to verify AUTO selects DOWN, then expands to RIGHT when wider.
+    const seed = await openTask('new-auto-task', { width: 820, height: 1000 });
     assert.equal(seed.view.defaultLayoutDirection, 'AUTO');
     await ready('DOWN');
     await expect(page.getByTestId('layout-direction')).toHaveValue('AUTO');
     metrics.narrowCanvas = await page.getByTestId('graph-canvas').evaluate(node => ({ width: node.clientWidth, height: node.clientHeight }));
-    assert.ok(metrics.narrowCanvas.width < metrics.narrowCanvas.height, 'the canvas is portrait despite a landscape browser window');
+    assert.ok(metrics.narrowCanvas.width < metrics.narrowCanvas.height, 'the canvas is portrait');
     await assertGeometry('01-auto-vertical', 'DOWN');
     const verticalPosition = await drag('manual', 'DOWN');
     const vertical = structuredClone(layout(await state(), 'DOWN'));
@@ -308,7 +318,7 @@ async function main() {
     await selectDirection('RIGHT', 'RIGHT');
     const horizontalPosition = await drag('manual', 'RIGHT', -28, 22);
     const horizontal = structuredClone(layout(await state(), 'RIGHT'));
-    await page.setViewportSize({ width: 1200, height: 1000 });
+    await page.setViewportSize({ width: 820, height: 1000 });
     await ready('RIGHT');
     await expect(page.getByTestId('layout-direction')).toHaveValue('RIGHT');
     await page.reload(); await ready('RIGHT');
@@ -348,14 +358,14 @@ async function main() {
     assert.deepEqual(layout(await state(), 'RIGHT'), executeLayout);
     assert.deepEqual(layout(await state(), 'DOWN', 'prepare'), prepareLayout);
     await selectDirection('AUTO', 'RIGHT');
-    await page.setViewportSize({ width: 1200, height: 1000 }); await ready('DOWN');
-    await page.getByRole('button', { name: '收起节点详情', exact: true }).click(); await ready('RIGHT');
+    await page.setViewportSize({ width: 1200, height: 1000 }); await ready('RIGHT');
     await page.getByRole('button', { name: '打开节点详情', exact: true }).click(); await ready('DOWN');
+    await page.getByRole('button', { name: '收起节点详情', exact: true }).click(); await ready('RIGHT');
     await assertBusiness(seed);
     assert.deepEqual((await state()).view.positions, seed.view.positions);
     check('direction preferences are per group; automatic mode follows editor width without modifying content or imported positions');
 
-    const pendingSeed = await openTask('pending-horizontal-move', { width: 1200, height: 1000 });
+    const pendingSeed = await openTask('pending-horizontal-move', { width: 820, height: 1000 });
     await ready('DOWN');
     const pendingVertical = structuredClone(layout(await state(), 'DOWN'));
     await page.setViewportSize({ width: 1920, height: 927 }); await ready('RIGHT');
@@ -386,7 +396,7 @@ async function main() {
     await expect(retryPosition).toBeVisible();
     await expect(page.getByTestId('layout-direction')).toBeDisabled();
     await assertPendingRight();
-    await page.setViewportSize({ width: 1200, height: 1000 });
+    await page.setViewportSize({ width: 820, height: 1000 });
     await expect.poll(() => page.getByTestId('graph-canvas').evaluate(node => node.clientHeight > node.clientWidth)).toBe(true);
     await page.waitForTimeout(350); // Let the responsive direction debounce settle.
     await expect(page.getByTestId('graph-canvas')).toHaveAttribute('data-direction', 'RIGHT');
@@ -444,7 +454,27 @@ async function main() {
     await assertClickGeometry('dispatch', 'RIGHT');
     await assertBusiness(branchSeed);
     check('horizontal branches and joins use separate ports and remain stable through selection after arrangement and a manual move');
-    const { screenX, screenY } = movedBranches.crossings[0];
+    // Pin a horizontal connection across the only direct corridor between the
+    // other two cards. This fixture remains crossed when ordinary fan-outs improve.
+    const crossingScope = 'crossing';
+    await openTask('forced-orthogonal-crossing', { width: 1920, height: 927 }, taskDirectory => {
+      const model = createDemoModel();
+      model.groups.push({ id: crossingScope, title: '交叉处显示', kind: 'editorial', claimIds: [] });
+      const points = { west:{x:0,y:300}, east:{x:1500,y:300}, above:{x:450,y:0}, below:{x:800,y:650} };
+      for (const id of Object.keys(points)) model.nodes.push({ ...structuredClone(model.nodes[0]), id, groupId: crossingScope });
+      const link = model.relations.find(r => r.type === 'sequence');
+      for (const [from,to] of [['west','east'],['above','below']]) model.relations.push({ ...structuredClone(link), id: from+'--'+to, from, to });
+      const store = createStore(taskDirectory, {model, initialGroupId:crossingScope});
+      const original = store.read();
+      const view = {scopeId:crossingScope, direction:'RIGHT', positions:points};
+      store.updateView({layout:{...view, action:'initialize', baseRevision:0, baseModelHash:original.modelHash, routes:{}}});
+      store.updateView({layout:{...view, action:'move', baseRevision:1}});
+    });
+    await ready('RIGHT', crossingScope);
+    const forced = await assertGeometry('07-forced-orthogonal-crossing','RIGHT');
+    assert.equal(forced.intersections.length,1, 'the pinned fixture must produce exactly one actual crossing');
+    assertCrossings(forced);
+    const { screenX, screenY } = forced.crossings[0];
     await page.mouse.move(screenX, screenY);
     await page.mouse.wheel(0, -460);
     await page.waitForTimeout(180);

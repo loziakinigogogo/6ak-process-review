@@ -8,17 +8,21 @@ import './layout-comparison.css';
 import { getGraphScope } from './graph-scope.mjs';
 import { arrangeComparisonGraph } from './comparison-layout.mjs';
 import { relationPorts, routeGeometryKey, type LayoutNode, type LayoutRoute, type RelationPort } from './graph-layout.mjs';
-import { ProcessEdge, ProcessHandles, measureEdgeLabel, processEdgeColor, useProcessRoutes } from './graph-routing';
+import { scopeLayoutEdges } from './graph-layout-input.mjs';
+import { ProcessEdge, ProcessHandles, processEdgeColor, useProcessRoutes } from './graph-routing';
 import { fieldLabels, relationLabels } from './structure-draft';
+import { ExitComparison, graphExits, GraphGroupBadge } from './exit-comparison';
+import { RelationEvidence } from './relation-evidence';
+import { groupsForDisplay } from './group-labels.mjs';
 
 type Claim = { id: string; text: string; origin: string; evidence: { sourceId: string; startLine: number; endLine: number; quote: string }[] };
 type ModelNode = { id: string; title: string; groupId: string; fields: Record<string, string[]>; claimIds: string[] };
-type Relation = { id: string; from: string; to: string; type: string; conditionClaimIds: string[] };
+type Relation = { id: string; from: string; to: string; type: string; claimIds: string[]; conditionClaimIds: string[] };
 type Model = { report: { title: string }; nodes: ModelNode[]; groups: { id: string; title: string }[]; claims: Claim[]; relations: Relation[]; sources: { id: string; name: string }[]; issues: { id: string; status: string; question: string; nodeIds: string[]; relationIds: string[] }[] };
 type Layout = { positions: Record<string, { x: number; y: number }>; routes: Record<string, LayoutRoute> };
 type Snapshot = { model: Model; workRevision: number; modelHash: string; sourceLabel: string; capturedAt: string; view: { selectedGroupId?: string; positions?: Layout['positions']; layouts?: Record<string, Layout> } };
 type Direction = 'RIGHT' | 'DOWN';
-type CardData = Record<string, unknown> & { node: ModelNode; groupIndex: number; groupTitle: string; context: boolean; role: string; actions: Claim[]; hasDetails: boolean; outgoing: number; issueCount: number; unknownCount: number; direction: Direction; open: () => void };
+type CardData = Record<string, unknown> & { node: ModelNode; groupIndex: number; groupTitle: string; displayNo: number; compareExits: () => void; context: boolean; role: string; actions: Claim[]; hasDetails: boolean; outgoing: number; issueCount: number; unknownCount: number; direction: Direction; open: () => void };
 const colors = ['#477e60', '#527c9b', '#a17736', '#81709a', '#a15d70', '#608381'];
 const groupStyle = (index: number) => ({ '--group-color': colors[(index + colors.length) % colors.length] }) as React.CSSProperties;
 
@@ -34,7 +38,7 @@ function CardBody({ item, selected = false }: { item: CardData; selected?: boole
   }, [item.actions]);
   const hasMore = item.actions.length > 2 || clipped;
   return <div className={`process-card ${selected ? 'is-selected' : ''} ${item.context ? 'context-node' : ''}`} style={groupStyle(item.groupIndex)}>
-    <div className="node-eyebrow"><span className="node-group-badge group-badge"><b>{String(item.groupIndex + 1).padStart(2, '0')}</b><span>{item.groupTitle}</span></span>{item.context && <span className="context-badge">组外</span>}</div>
+    <div className="node-eyebrow"><GraphGroupBadge groupIndex={item.groupIndex} title={item.groupTitle} number={item.displayNo} context={item.context}/></div>
     <div className="node-title">{item.node.title}</div>
     {item.role && <div className="node-role" title={item.role}>{item.role}</div>}
     <div className="node-actions" ref={preview}>
@@ -44,7 +48,7 @@ function CardBody({ item, selected = false }: { item: CardData; selected?: boole
       {hasMore && <button className="node-detail-hint node-actions-link nodrag nopan" onClick={item.open}>{item.actions.length === 1 ? '查看完整操作' : `查看全部 ${item.actions.length} 条操作`} <ArrowRight size={11} /></button>}
       {item.hasDetails && <button className="node-detail-hint nodrag nopan" onClick={item.open}>查看细节与补充 <ArrowRight size={11} /></button>}
     </div>}
-    <div className="node-meta"><span>{item.outgoing > 1 && <><GitBranch size={11} /> {item.outgoing} 条路径</>}</span>{item.issueCount > 0 ? <span className="node-issue"><AlertCircle size={11} /> {item.issueCount} 待确认</span> : item.unknownCount > 0 && <span className="node-issue"><AlertCircle size={11} /> {item.unknownCount} 项未说明</span>}</div>
+    <div className="node-meta">{item.outgoing > 1 && <button className="compare-exits nodrag nopan" onClick={event => { event.stopPropagation(); item.compareExits(); }}><GitBranch size={12}/>对照 {item.outgoing} 个出口</button>}{item.issueCount > 0 ? <span className="node-issue"><AlertCircle size={11} /> {item.issueCount} 待确认</span> : item.unknownCount > 0 && <span className="node-issue"><AlertCircle size={11} /> {item.unknownCount} 项未说明</span>}</div>
   </div>;
 }
 
@@ -62,6 +66,9 @@ function Comparison({ snapshot }: { snapshot: Snapshot }) {
   const [group, setGroup] = useState(model.groups.some(g => g.id === 'submit') ? 'submit' : snapshot.view.selectedGroupId || model.groups[0]?.id || 'all');
   const [directionMode, setDirectionMode] = useState<'AUTO' | Direction>('AUTO');
   const [selected, setSelected] = useState<string | null>(null);
+  const [compareNodeId, setCompareNodeId] = useState<string | null>(null);
+  const [selectedRelationId, setSelectedRelationId] = useState<string | null>(null);
+  const selectedBranch = useRef<HTMLDivElement>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [inspector, setInspector] = useState(window.innerWidth > 760);
   const [collapsed, setCollapsed] = useState(window.innerWidth <= 760);
@@ -77,11 +84,18 @@ function Comparison({ snapshot }: { snapshot: Snapshot }) {
   const direction: Direction = directionMode === 'AUTO' ? automaticDirection : directionMode;
   const measurements = useRef<HTMLDivElement>(null), canvas = useRef<HTMLDivElement>(null);
   const { setViewport: moveViewport, zoomIn, zoomOut } = useReactFlow();
+  const displayGroups = useMemo(() => groupsForDisplay(model), [model]);
   const scope = useMemo(() => getGraphScope(model, group), [model, group]);
   const claimMap = useMemo(() => new Map(model.claims.map(c => [c.id, c])), [model]);
-  const open = (id: string) => { setSelected(id); setInspector(true); };
+  const open = (id: string, relationId: string | null = null) => {
+    setSelected(id);
+    setSelectedRelationId(relationId);
+    setInspector(true);
+  };
+  useEffect(() => { selectedBranch.current?.scrollIntoView({ block: 'nearest' }); }, [selectedRelationId]);
   const cards = useMemo(() => (scope.nodes as ModelNode[]).map(node => ({
-    node, groupIndex: model.groups.findIndex(g => g.id === node.groupId), groupTitle: model.groups.find(g => g.id === node.groupId)?.title || node.groupId,
+    node, displayNo: model.nodes.filter(n => n.groupId === node.groupId).findIndex(n => n.id === node.id) + 1, compareExits: () => setCompareNodeId(node.id),
+    groupIndex: model.groups.findIndex(g => g.id === node.groupId), groupTitle: displayGroups.find(g => g.id === node.groupId)?.title || node.groupId,
     context: scope.contextIds.has(node.id), direction,
     role: (node.fields.role || []).map(id => claimMap.get(id)?.text).filter(Boolean).join('、').replace(/[。.]$/, ''),
     actions: (node.fields.actions || []).map(id => claimMap.get(id)).filter((c): c is Claim => Boolean(c)),
@@ -91,11 +105,9 @@ function Comparison({ snapshot }: { snapshot: Snapshot }) {
     unknownCount: node.claimIds.filter(id => claimMap.get(id)?.origin === 'unknown').length,
     open: () => open(node.id),
   })), [scope, model, claimMap, direction]);
-  const relations = useMemo(() => (scope.relations as Relation[]).map(r => {
-    const label = r.conditionClaimIds.map(id => claimMap.get(id)?.text || '').join('；') || (['return', 'data', 'association'].includes(r.type) ? relationLabels[r.type] : '');
-    return { ...r, label, ...measureEdgeLabel(label) };
-  }), [scope, claimMap]);
-  const ports = useMemo(() => relationPorts(relations), [relations]);
+  const exits = useMemo(() => graphExits(model), [model]);
+  const relations = useMemo(() => scopeLayoutEdges((scope.relations as Relation[]).map(r => exits.get(r.id)!.geometry), scope.contextIds), [scope, exits]);
+  const ports = useMemo(() => relationPorts(relations, boxes, direction), [relations, boxes, direction]);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,7 +120,7 @@ function Comparison({ snapshot }: { snapshot: Snapshot }) {
       const measured = cards.map(item => {
         const element = measurements.current?.querySelector<HTMLElement>(`[data-measure-id="${CSS.escape(item.node.id)}"] .process-card`);
         if (!element) throw new Error('节点尺寸尚未就绪');
-        return { id: item.node.id, x: 0, y: 0, width: element.offsetWidth, height: element.offsetHeight };
+        return { id: item.node.id, order: model.nodes.indexOf(item.node), x: 0, y: 0, width: element.offsetWidth, height: element.offsetHeight };
       });
       const saved = snapshot.view.layouts?.[group];
       const baseline = saved?.positions || (group === 'all' ? snapshot.view.positions : undefined);
@@ -165,7 +177,7 @@ function Comparison({ snapshot }: { snapshot: Snapshot }) {
     const highlighted = hovered || (!hoveredEdgeId && selected === r.from);
     return { id: r.id, source: r.from, target: r.to, type: 'process', sourceHandle: handles.source.id, targetHandle: handles.target.id,
       zIndex: hovered ? 1 : 0, markerEnd: { type: MarkerType.ArrowClosed, width: 17, height: 17, color: processEdgeColor(r.type, highlighted) },
-      data: { kind: r.type, highlighted, label: r.label, labelWidth: r.labelWidth, labelHeight: r.labelHeight, drawing: drawings?.get(r.id) },
+      data: { kind: r.type, highlighted, accessibleName: exits.get(r.id)?.accessibleName, openRelation: () => open(r.from, r.id), label: r.label, labelWidth: r.labelWidth, labelHeight: r.labelHeight, drawing: drawings?.get(r.id) },
     };
   });
   useEffect(() => setHoveredEdgeId(null), [group, direction]);
@@ -179,15 +191,15 @@ function Comparison({ snapshot }: { snapshot: Snapshot }) {
   return <div className={`app-shell comparison-shell ${!inspector ? 'inspector-closed' : ''}`} data-direction={direction} data-direction-mode={directionMode}>
     <header className="app-header"><div className="brand"><span className="brand-mark"><Network size={20} /></span><span>6ak <span className="brand-divider">/</span><strong>流程工作台</strong></span></div><div className="header-task"><span className="task-name">{model.report.title}</span><span className="comparison-badge">布局对照 · 只读</span></div><div className="header-actions"><span className="version-badge">同一份工作稿 W{snapshot.workRevision}</span></div></header>
     <div className="workspace"><main className="canvas-section">
-      <div className="canvas-toolbar"><div className="scope-title"><h1>{group === 'all' ? '完整流程' : model.groups.find(g => g.id === group)?.title}</h1><span>{scope.coreNodes.length} 本组 · {scope.contextNodes.length} 相邻</span></div>
+      <div className="canvas-toolbar"><div className="scope-title"><h1>{group === 'all' ? '完整流程' : displayGroups.find(g => g.id === group)?.title}</h1><span>{scope.coreNodes.length} 本组 · {scope.contextNodes.length} 相邻</span></div>
         <div className="comparison-directions" role="group" aria-label="流程方向"><button aria-pressed={directionMode === 'AUTO'} onClick={() => setDirectionMode('AUTO')} data-testid="direction-auto" title="根据中央画布宽高自动选择；宽高相同时使用横向">自动 · {automaticDirection === 'RIGHT' ? '横向' : '纵向'}</button><button aria-pressed={directionMode === 'DOWN'} onClick={() => setDirectionMode('DOWN')} data-testid="direction-down"><ArrowDown size={14} />纵向原版</button><button aria-pressed={directionMode === 'RIGHT'} onClick={() => setDirectionMode('RIGHT')} data-testid="direction-right"><ArrowRight size={14} />横向对照</button></div>
         <div className="canvas-tools"><button className={`secondary-button comparison-scale ${Math.abs(viewport.zoom - .82) < .001 ? 'active' : ''}`} onClick={() => { setMode('equal'); setViewRequest(n => n + 1); }} data-testid="equal-scale">等比例 82%</button><button className="secondary-button comparison-scale" onClick={() => { setMode('fit'); setViewRequest(n => n + 1); }} data-testid="fit-graph"><Maximize2 size={13} /><span>适应当前图</span></button><button className="icon-button" title={inspector ? '收起详情' : '展开详情'} aria-label={inspector ? '收起详情' : '展开详情'} onClick={() => setInspector(!inspector)}>{inspector ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button></div>
       </div>
       <div className="graph-area" ref={canvas} data-testid="comparison-canvas" aria-busy={!layout && !error}>
-        <ReactFlow key={`${group}:${direction}`} nodes={layout ? nodes : []} edges={layout ? edges : []} nodeTypes={nodeTypes} edgeTypes={edgeTypes} nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null} minZoom={.1} maxZoom={2} onNodeClick={(_, node) => open(node.id)} onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)} onPaneClick={() => setSelected(null)} onMove={(_, next) => setViewport(next)} proOptions={{ hideAttribution: true }}>
+        <ReactFlow key={`${group}:${direction}`} nodes={layout ? nodes : []} edges={layout ? edges : []} nodeTypes={nodeTypes} edgeTypes={edgeTypes} nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null} minZoom={.1} maxZoom={2} onNodeClick={(_, node) => open(node.id)} onEdgeClick={(_, edge) => open(edge.source, edge.id)} onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)} onPaneClick={() => setSelected(null)} onMove={(_, next) => setViewport(next)} proOptions={{ hideAttribution: true }}>
             <Background variant={BackgroundVariant.Dots} gap={20} size={.7} color="#cbd7c7" />
         </ReactFlow>
-        <nav className={`group-navigator ${collapsed ? 'is-collapsed' : ''}`} aria-label="整理分组"><button className="navigator-toggle" onClick={() => setCollapsed(!collapsed)} aria-expanded={!collapsed}><Layers3 size={14} /><span>整理分组</span><ChevronDown size={12} /></button>{!collapsed && <div className="navigator-list"><button className={`navigator-item all-groups ${group === 'all' ? 'active' : ''}`} onClick={() => changeGroup('all')} data-testid="group-all"><Layers3 size={13} /><span>完整流程</span><small>{model.nodes.length}</small></button>{model.groups.map((g, i) => <button className={`navigator-item ${g.id === group ? 'active' : ''}`} style={groupStyle(i)} key={g.id} onClick={() => changeGroup(g.id)} data-testid={`group-${g.id}`}><span className="navigator-index">{String(i + 1).padStart(2, '0')}</span><span>{g.title}</span><small>{model.nodes.filter(n => n.groupId === g.id).length}</small></button>)}<p className="navigator-note">分组视图同时显示直接相连的上下游。</p></div>}</nav>
+        <nav className={`group-navigator ${collapsed ? 'is-collapsed' : ''}`} aria-label="整理分组"><button className="navigator-toggle" onClick={() => setCollapsed(!collapsed)} aria-expanded={!collapsed}><Layers3 size={14} /><span>整理分组</span><ChevronDown size={12} /></button>{!collapsed && <div className="navigator-list"><button className={`navigator-item all-groups ${group === 'all' ? 'active' : ''}`} onClick={() => changeGroup('all')} data-testid="group-all"><Layers3 size={13} /><span>完整流程</span><small>{model.nodes.length}</small></button>{displayGroups.map((g, i) => <button className={`navigator-item ${g.id === group ? 'active' : ''}`} style={groupStyle(i)} key={g.id} onClick={() => changeGroup(g.id)} data-testid={`group-${g.id}`}><span className="navigator-index">{String(i + 1).padStart(2, '0')}</span><span>{g.title}</span><small>{model.nodes.filter(n => n.groupId === g.id).length}</small></button>)}<p className="navigator-note">分组视图同时显示直接相连的上下游。</p></div>}</nav>
         {!layout && <div className="comparison-loading" role={error ? 'alert' : 'status'}>{error || '正在整理布局…'}</div>}
         <div className="graph-legend"><span><i className="legend-line" />已知流转</span><span><i className="legend-line dashed" />返回 / 关联</span><span><i className="legend-issue" />有待确认</span></div>
         <div className="zoom-tools"><button aria-label="放大" onClick={() => zoomIn()}><Plus size={16} /></button><button aria-label="缩小" onClick={() => zoomOut()}><Minus size={16} /></button></div>
@@ -195,11 +207,12 @@ function Comparison({ snapshot }: { snapshot: Snapshot }) {
       <footer className="canvas-footer"><span>同一内容 · 相同字号 <span className="footer-dot">·</span> 缩放 {Math.round(viewport.zoom * 100)}%</span><span data-testid="comparison-metrics">{layout ? `完整可见 ${visibleCount}/${boxes.length} 节点 · 图幅 ${Math.round(bounds.width)} × ${Math.round(bounds.height)}` : '布局计算中'}</span></footer>
     </main>
     {inspector && <aside className="inspector"><div className="inspector-header"><span className="inspector-title">节点内容</span><button className="icon-button" aria-label="关闭节点内容" onClick={() => setInspector(false)}><X size={16} /></button></div>{current ? <div className="inspector-scroll comparison-details"><div className="comparison-readonly">仅查看 · 内容与原工作台一致</div><h2>{current.title}</h2>{Object.entries(current.fields).map(([field, ids]) => ids.length > 0 && <section key={field}><h3>{fieldLabels[field] || field}</h3>{ids.map(id => { const c = claimMap.get(id); return c && <p key={id}>{c.origin === 'unknown' && <span className="comparison-unknown">未说明 · </span>}{c.text}</p>; })}</section>)}
-      {model.relations.some(r => r.from === current.id) && <section><h3>后续路径</h3>{model.relations.filter(r => r.from === current.id).map(r => <div className="comparison-branch" key={r.id}><p>{r.conditionClaimIds.map(id => claimMap.get(id)?.text).join('；') || relationLabels[r.type]}</p><button onClick={() => { if (!scope.visibleIds.has(r.to)) setGroup(model.nodes.find(n => n.id === r.to)?.groupId || 'all'); open(r.to); }}><ArrowRight size={12} />{model.nodes.find(n => n.id === r.to)?.title}</button></div>)}</section>}
+      {model.relations.some(r => r.from === current.id) && <section><h3>后续路径</h3>{model.relations.filter(r => r.from === current.id).map(r => <div className="comparison-branch" key={r.id} ref={r.id === selectedRelationId ? selectedBranch : undefined}><p>{r.conditionClaimIds.map(id => claimMap.get(id)?.text).join('；') || relationLabels[r.type]}</p>{r.id === selectedRelationId && <RelationEvidence model={model} claimIds={r.conditionClaimIds.length ? r.conditionClaimIds : r.claimIds} />}<button onClick={() => { if (!scope.visibleIds.has(r.to)) setGroup(model.nodes.find(n => n.id === r.to)?.groupId || 'all'); open(r.to); }}><ArrowRight size={12} />{model.nodes.find(n => n.id === r.to)?.title}</button></div>)}</section>}
       {model.issues.filter(i => i.status === 'open' && (i.nodeIds.includes(current.id) || i.relationIds.some(id => model.relations.some(r => r.id === id && r.from === current.id)))).map(i => <section className="comparison-issue" key={i.id}><h3>待确认</h3><p>{i.question}</p></section>)}
       <details className="comparison-evidence"><summary>原文依据</summary>{current.claimIds.map(id => { const c = claimMap.get(id); return c?.evidence.map((e, i) => <blockquote key={`${id}-${i}`}><p>{e.quote}</p><small>{model.sources.find(s => s.id === e.sourceId)?.name || e.sourceId} · 第 {e.startLine}–{e.endLine} 行</small></blockquote>); })}</details>
     </div> : <div className="empty-inspector"><Network size={29} /><h3>选中一个节点</h3><p>查看完整操作、条件与原文依据。</p><span className="comparison-readonly">布局切换不会保存到原工作台</span></div>}</aside>}
     </div>
+    {compareNodeId && <ExitComparison nodeId={compareNodeId} model={model} exits={exits} onClose={() => setCompareNodeId(null)} />}
     <div ref={measurements} className="comparison-measure" aria-hidden="true">{cards.map(item => <div data-measure-id={item.node.id} key={item.node.id}><CardBody item={item} /></div>)}</div>
   </div>;
 }

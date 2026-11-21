@@ -40,6 +40,20 @@ function valid(model) {
   return result;
 }
 
+test('identical predicates on sibling conditional exits prompt semantic review while parallel exits remain valid', () => {
+  const model = fixture();
+  const condition = model.claims.find(claim => claim.id === 'approval-15');
+  model.claims.push({ ...condition, id: 'approval-copy' });
+  model.relations = ['submit', 'check'].map((to, index) => {
+    const claimId = index ? 'approval-copy' : condition.id;
+    return { id: 'exit-' + to, from: 'calculate', to, type: 'conditional', claimIds: [claimId], conditionClaimIds: [claimId] };
+  });
+  const shared = /exit-submit.*exit-check.*相同条件/;
+  assert.ok(valid(model).warnings.some(message => shared.test(message)));
+  for (const edge of model.relations) edge.type = 'parallel';
+  assert.ok(!valid(model).warnings.some(message => shared.test(message)));
+});
+
 function rejection(action, expression, status) {
   assert.throws(action, error => {
     assert.match(error.message, expression);

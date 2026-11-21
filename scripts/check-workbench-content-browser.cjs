@@ -31,9 +31,11 @@ async function main() {
   const form = ()=>page.getByTestId('content-composer');
   try {
     await page.goto(app.url);
-    await expect(page.getByTestId('node-title')).toHaveValue('校验降幅');
+    await expect(page.getByTestId('node-inspector')).toHaveCount(0);
+    await page.getByTestId('graph-node-validate').click();
+    await expect(page.getByTestId('node-title')).toHaveText('校验降幅');
     const baseline = await state();
-    await page.getByTestId('organize-node').click();await panel.getByTestId('add-content-note').click();
+    await page.getByTestId('view-node-materials').click();await panel.getByTestId('add-content-note').click();
     await expect(page.getByTestId('quick-content')).toHaveCount(0);await expect(panel).toBeVisible();
     await expect(page.getByTestId('graph-canvas')).toBeHidden();
     await expect(form().getByLabel('补充原话',{exact:true})).toBeFocused();
@@ -58,6 +60,15 @@ async function main() {
     assert.equal(first.kind,'raw');assert.equal(first.title,'');assert.equal(first.parentId,null);
     check('Graph enters the selected node wide workspace; result and materials stay separate without a duplicate drawer');
 
+    const splitReview = panel.getByRole('button', { name: '核对节点拆分' });
+    await splitReview.click();
+    await expect(page.getByTestId('agent-task-targets')).toContainText('校验降幅');
+    await expect(page.getByTestId('agent-task-text')).toHaveValue(/各自启动/);
+    await expect(page.getByTestId('agent-task-materials')).toContainText(baseline.model.sources[0].name);
+    await page.getByTestId('cancel-agent-task').click();
+    await expect(splitReview).toBeFocused();
+    check('Node split review opens with the selected node and its source materials');
+
     // Existing classified records remain readable/editable, but new material
     // entry no longer makes users choose a section or semantic category.
     await content({operation:'create',entryType:'section',title:'平台差异'});
@@ -72,6 +83,7 @@ async function main() {
     await page.reload();
     await expect(panel.locator('.content-entry-text').filter({hasText:'渠道 A'})).toBeVisible();
     await page.getByTestId('view-graph').click();
+    await page.getByTestId('graph-node-validate').click();
     await expect(page.getByTestId('node-inspector')).not.toContainText('渠道 A');await page.getByTestId('view-node-materials').click();await expect(panel.locator('.content-entry-text').filter({hasText:'渠道 A'})).toBeVisible();await page.getByTestId('view-graph').click();
     assert.equal((await state()).modelHash,baseline.modelHash);
     assert.equal((await state()).workRevision,baseline.workRevision);
@@ -79,7 +91,7 @@ async function main() {
     assert.equal(retained.kind,'reminder');assert.equal(retained.title,'旧录入提醒');assert.equal(retained.parentId,section.id);assert.equal(retained.revisions[0].text,'渠道 A 容易忘记备注。');
     check('Existing section/classification/title and original history survive simple text editing without changing model or W');
 
-    await page.getByTestId('organize-node').click();await panel.getByTestId('add-content-note').click();
+    await page.getByTestId('view-node-materials').click();await panel.getByTestId('add-content-note').click();
     await form().getByLabel('补充原话',{exact:true}).fill('服务已保存但响应丢失的原话。');
     let applied;
     await page.route('**/api/workbench/content',async route=>{applied=await route.fetch();await route.abort('failed');},{times:1});
@@ -131,13 +143,13 @@ async function main() {
     await expect(panel.locator('[data-node-section="role"]')).toContainText('财务专员');
     await expect(page.getByTestId('node-inspector')).toHaveCount(0);
     await page.getByTestId('view-graph').click();
-    await expect(page.locator('.react-flow__node[data-id="validate"] .node-role')).toHaveText('财务专员');
+    await expect(page.locator('.react-flow__node[data-id="validate"] .node-eyebrow')).toContainText('财务专员');
     const adopted=await state();assert.deepEqual(adopted.model.issues,baseline.model.issues);assert.deepEqual(adopted.model.sources[0],baseline.model.sources[0]);
     assert.equal(adopted.contentTree.entries.find(e=>e.id===fact.id).text,fact.text);
     check('UI handoff → actual CLI source snapshot → review/apply updates node and preserves original input, source and unknowns');
 
     await page.setViewportSize({width:390,height:844});
-    await page.getByTestId('organize-node').click();await panel.getByTestId('add-content-note').click();
+    await page.getByTestId('view-content').click();await panel.getByTestId('add-content-note').click();
     await expect(page.getByTestId('quick-content')).toHaveCount(0);await expect(panel).toBeVisible();
     await form().getByLabel('补充原话',{exact:true}).fill('窄屏尚未保存原话。');
     await page.screenshot({path:path.join(directory,'02-narrow-quick.png'),fullPage:false});
@@ -147,7 +159,7 @@ async function main() {
     if(!(await page.getByTestId('node-inspector').count()))await page.getByRole('button',{name:'打开节点详情',exact:true}).click();
     await expect(page.getByTestId('node-inspector')).not.toContainText('窄屏尚未保存原话');
     await page.reload();
-    await page.getByTestId('organize-node').click();await panel.getByTestId('add-content-note').click();
+    await page.getByTestId('view-content').click();await panel.getByTestId('add-content-note').click();
     await expect(form().getByLabel('补充原话',{exact:true})).toHaveValue('窄屏尚未保存原话。');
     check('Narrow material input is reachable, survives graph/list and reload, and stays outside generated reading');
     assert.deepEqual(result.errors,[]);

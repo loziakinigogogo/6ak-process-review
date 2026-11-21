@@ -25,6 +25,7 @@
 ## 分组、节点与关系
 
 - `groups[]`：`{id,title,kind,claimIds}`。`kind` 为 `source`（原文分组，有 claim 依据）或 `editorial`（为阅读整理的分组，界面显示“整理分组”）。不固定数量与名称。
+- `groups[].title` 保存确认的业务名称。阅读序号取自 `groups[]` 的顺序，草图表头可用「序号｜组名｜边界」。原文表格将「阶段 3（STAGE-3）」与名称分列时，将正式阶段标识和该阶段原文行纳入分组的明示陈述，正文名称单独保存。用户指定的正式名称与业务数字（如 48h 截单）按原意保留。重排组序时沿用组 ID、节点及原文阶段标识。
 - `nodes[]`：`{id,groupId,title,claimIds,fields}`。标题是有依据的简短归纳，`claimIds` 支持该节点的业务含义。`fields` 必须包含 `role,system,trigger,input,actions,output,rules` 七个键，每个值都是 claim ID 数组。空数组显示“原文未说明”，不能填默认职责或动作；关键未知项应建立 unknown claim 和 issue。
 - 字段按含义归位：`trigger` 是事件或前置条件，`input` 是操作消耗或使用的资料，`actions` 是执行行为，`output` 是完成后产生的交付物或状态。来源、耗时和后续步骤不充当产出；保留在对应陈述、规则或关系中。条件“若不一致”不能改写为已经发生不一致。
 - `relations[]`：`{id,from,to,type,claimIds,conditionClaimIds}`。端点是 node ID。`type` 为 `sequence,conditional,parallel,return,data,association`。关系方向与类型由 `claimIds` 支持；条件分支的 `conditionClaimIds` 非空。每个 condition 必须也是该关系的 claim。关系可标记推断，但不得以 unknown claim 建立确定边。没有依据的先后保持未连接，在 issue 中说明。

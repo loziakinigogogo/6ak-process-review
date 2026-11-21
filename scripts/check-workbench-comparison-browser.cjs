@@ -76,10 +76,13 @@ async function main() {
     await page.screenshot({ path: path.join(directory, '01-horizontal-equal.png') });
     checks.push('automatic horizontal uses measured 240px cards without overlaps at 82%');
 
-    await page.setViewportSize({ width: 1280, height: 1000 });
+    // Leave room for the header, toolbar and footer so the canvas becomes
+    // portrait with the inspector open and landscape again when it closes.
+    await page.setViewportSize({ width: 1280, height: 1080 });
+    await expect.poll(async () => { const size = await canvasDimensions(); return size.width < size.height; },
+      { message: 'the test viewport must produce a portrait canvas with the inspector open' }).toBe(true);
     await directionReady('DOWN');
     metrics.autoTallCanvas = await canvasDimensions();
-    assert.ok(metrics.autoTallCanvas.width < metrics.autoTallCanvas.height, 'canvas must be portrait although the browser window is landscape');
     await assertCardGeometry(200);
     const downDimensions = await dimensions();
     assert.deepEqual(await cardContent(), originalContent, 'automatic orientation preserves text and typography');

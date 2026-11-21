@@ -167,6 +167,53 @@ function parallelOverlap(a, b) {
   return Math.max(0, Math.min(a.end, b.end) - Math.max(a.start, b.start));
 }
 
+/** Compare clear orthogonal lanes against the paths the reader will actually see. */
+export function reduceBranchCrossings(routes, nodes, direction) {
+  const chosen = new Map(routes.map(r => [r.id, orthogonalSegments(compactPolyline(r.points))]));
+  const updated = new Map(), counts = new Map();
+  for (const r of routes) counts.set(r.from, (counts.get(r.from) || 0) + 1);
+  for (const r of routes) {
+    const feedback = r.type === 'return';
+    if (!feedback && counts.get(r.from) < 4) continue;
+    const a = r.points[0], b = r.points.at(-1);
+    const axis = (direction === 'RIGHT') !== feedback ? 'x' : 'y';
+    const gap = b[axis] - a[axis];
+    if (!feedback && gap < 64) continue;
+    const occupied = [...chosen].filter(([id]) => id !== r.id).flatMap(([, segments]) => segments);
+    const quality = segments => {
+      let crossings = 0;
+      for (const s of segments) for (const t of occupied) {
+        if (s.axis !== t.axis && s.coordinate > t.start + POINT_EPSILON && s.coordinate < t.end - POINT_EPSILON
+          && t.coordinate > s.start + POINT_EPSILON && t.coordinate < s.end - POINT_EPSILON) crossings++;
+      }
+      return { crossings, overlap: overlapScore(segments, occupied), length: segments.reduce((sum, s) => sum + s.end - s.start, 0) };
+    };
+    const base = quality(chosen.get(r.id));
+    if (!base.crossings && base.overlap < MIN_SHARED_RUN) continue;
+    let best = base;
+    // Forward branches turn at different depths in the free inter-layer corridor.
+    // A return may turn outside its endpoints or just beyond an obstructing card.
+    const count = Math.min(24, Math.floor(gap / 16));
+    const lanes = feedback
+      ? [...new Set([Math.min(a[axis], b[axis]), ...nodes.map(n => n[axis])].map(v => v - 30))]
+        .filter(v => v < Math.min(a[axis], b[axis]) - 8)
+      : Array.from({ length: count }, (_, i) => a[axis] + 16 + i * (gap - 32) / (count - 1));
+    for (const lane of lanes) {
+      const points = compactPolyline([a, { ...a, [axis]: lane }, { ...b, [axis]: lane }, b]);
+      if (points.slice(1).some((p,i) => nodes.some(n => segmentEntersBox(points[i],p,n,n.id === r.from || n.id === r.to ? .2 : -6)))) continue;
+      const segments = orthogonalSegments(points), cost = quality(segments);
+      if (cost.length > base.length * 1.5 + 64 || cost.overlap > base.overlap + POINT_EPSILON) continue;
+      if (cost.crossings < best.crossings || (cost.crossings === best.crossings && (cost.overlap < best.overlap - POINT_EPSILON
+        || (Math.abs(cost.overlap - best.overlap) < POINT_EPSILON && cost.length < best.length - 1)))) {
+        best = cost;
+        chosen.set(r.id, segments);
+        updated.set(r.id, points);
+      }
+    }
+  }
+  return updated;
+}
+
 function overlapScore(segments, occupied) {
   let score = 0;
   for (const segment of segments) {
